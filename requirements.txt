@@ -3,3 +3,4 @@ flask-cors==4.0.1
 psycopg2-binary==2.9.9
 apscheduler==3.10.4
 gunicorn==22.0.0
+requests==2.31.0
