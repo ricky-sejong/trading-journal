@@ -127,7 +127,6 @@ def okx_request(path, params=None):
         'OK-ACCESS-TIMESTAMP':  ts,
         'OK-ACCESS-PASSPHRASE': cfg['passphrase'],
         'Content-Type':         'application/json',
-        'User-Agent':           'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     }
     req = urllib.request.Request(base + full_path, headers=headers)
     try:
@@ -333,16 +332,31 @@ def get_positions():
         return jsonify({'ok': False, 'msg': result.get('msg')}), 400
     positions = []
     for p in result.get('data', []):
-        if float(p.get('pos', 0)) == 0: continue
+        contracts = float(p.get('pos', 0))
+        if contracts == 0:
+            continue
+        ct_val = float(p.get('ctVal', 1))
+        real_size = contracts * ct_val
+        if real_size == int(real_size):
+            size_str = str(int(real_size))
+        else:
+            size_str = '{:.8f}'.format(real_size).rstrip('0')
         positions.append({
-            'inst': p.get('instId',''), 'side': p.get('posSide',''),
-            'size': p.get('pos',''), 'avg_px': p.get('avgPx',''),
-            'upl': p.get('upl',''), 'upl_pct': p.get('uplRatio',''), 'lever': p.get('lever',''),
+            'inst':      p.get('instId', ''),
+            'side':      p.get('posSide', ''),
+            'size':      size_str,
+            'contracts': str(int(contracts)),
+            'avg_px':    p.get('avgPx', ''),
+            'upl':       p.get('upl', ''),
+            'upl_pct':   p.get('uplRatio', ''),
+            'lever':     p.get('lever', ''),
         })
     summary = ' / '.join([
-        '{} {} {}개'.format(p['inst'].replace('-USDT-SWAP',''), '롱' if p['side']=='long' else '숏', p['size'])
-        for p in positions
-    ]) if positions else '없음'
+        '{} {}'.format(
+            p['inst'].replace('-USDT-SWAP', ''),
+            'LONG' if p['side'] == 'long' else 'SHORT'
+        ) for p in positions
+    ]) if positions else 'NONE'
     return jsonify({'ok': True, 'positions': positions, 'summary': summary})
 
 if __name__ == '__main__':

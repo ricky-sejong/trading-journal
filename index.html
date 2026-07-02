@@ -523,17 +523,18 @@ function refreshPositions(){
         ['tick-pos','tick-pos2'].forEach(function(id){document.getElementById(id).textContent='NONE';});return;}
       var rows=d.positions.map(function(p){
         var uc=parseFloat(p.upl)>=0?'var(--green)':'var(--red)';
+        var uplVal=parseFloat(p.upl);
         return '<tr>'+
           '<td style="color:var(--yellow)">'+p.inst.replace('-USDT-SWAP','')+'</td>'+
           '<td><span class="t-side '+(p.side==='long'?'long':'short')+'">'+(p.side==='long'?'LONG':'SHORT')+'</span></td>'+
           '<td>'+p.size+'</td>'+
           '<td>'+parseFloat(p.avg_px).toLocaleString()+'</td>'+
           '<td>'+p.lever+'x</td>'+
-          '<td style="color:'+uc+'">'+parseFloat(p.upl).toFixed(2)+' U</td>'+
+          '<td style="color:'+uc+'">'+(uplVal>=0?'+':'')+uplVal.toFixed(2)+' USDT</td>'+
           '<td style="color:'+uc+'">'+(parseFloat(p.upl_pct)*100).toFixed(2)+'%</td>'+
         '</tr>';
       }).join('');
-      document.getElementById('pos-result').innerHTML='<table class="pos-table"><thead><tr><th>INSTRUMENT</th><th>SIDE</th><th>SIZE</th><th>ENTRY</th><th>LEV</th><th>UPNL</th><th>RETURN</th></tr></thead><tbody>'+rows+'</tbody></table>';
+      document.getElementById('pos-result').innerHTML='<table class="pos-table"><thead><tr><th>INSTRUMENT</th><th>SIDE</th><th>SIZE</th><th>ENTRY</th><th>LEV</th><th>PNL</th><th>RETURN</th></tr></thead><tbody>'+rows+'</tbody></table>';
       ['tick-pos','tick-pos2'].forEach(function(id){document.getElementById(id).textContent=d.summary;});
     }).catch(function(){});
 }
