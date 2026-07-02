@@ -127,7 +127,6 @@ def okx_request(path, params=None):
         'OK-ACCESS-TIMESTAMP':  ts,
         'OK-ACCESS-PASSPHRASE': cfg['passphrase'],
         'Content-Type':         'application/json',
-        'User-Agent':           'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     }
     req = urllib.request.Request(base + full_path, headers=headers)
     try:
@@ -346,23 +345,65 @@ def get_positions():
         return jsonify({'ok': False, 'msg': result.get('msg')}), 400
     positions = []
     for p in result.get('data', []):
-        contracts = float(p.get('pos', 0))
+        # 빈 문자열 방어
+        try:
+            contracts = float(p.get('pos', 0) or 0)
+        except (ValueError, TypeError):
+            contracts = 0
         if contracts == 0:
             continue
-        ct_val = float(p.get('ctVal', 1))
-        real_size = contracts * ct_val
+
+        # ctVal: 계약 1개당 코인 수량. 빈 문자열이면 1로 폴백
+        try:
+            ct_val = float(p.get('ctVal', '') or 1)
+            if ct_val == 0:
+                ct_val = 1
+        except (ValueError, TypeError):
+            ct_val = 1
+
+        # ctMult: 승수 (대부분 1, 일부 상품 다름)
+        try:
+            ct_mult = float(p.get('ctMult', '') or 1)
+            if ct_mult == 0:
+                ct_mult = 1
+        except (ValueError, TypeError):
+            ct_mult = 1
+
+        real_size = contracts * ct_val * ct_mult
+
+        # 소수점 정리
         if real_size == int(real_size):
             size_str = str(int(real_size))
         else:
             size_str = '{:.8f}'.format(real_size).rstrip('0')
+
+        # 현재가 (markPx)
+        try:
+            mark_px = float(p.get('markPx', 0) or 0)
+        except (ValueError, TypeError):
+            mark_px = 0
+
+        # UPL, uplRatio
+        try:
+            upl = float(p.get('upl', 0) or 0)
+        except (ValueError, TypeError):
+            upl = 0
+        try:
+            upl_pct = float(p.get('uplRatio', 0) or 0)
+        except (ValueError, TypeError):
+            upl_pct = 0
+
+        print(f'[pos] {p.get("instId")} contracts={contracts} ctVal={ct_val} ctMult={ct_mult} realSize={real_size} markPx={mark_px}')
+
         positions.append({
             'inst':      p.get('instId', ''),
             'side':      p.get('posSide', ''),
             'size':      size_str,
             'contracts': str(int(contracts)),
             'avg_px':    p.get('avgPx', ''),
-            'upl':       p.get('upl', ''),
-            'upl_pct':   p.get('uplRatio', ''),
+            'mark_px':   round(mark_px, 4) if mark_px else None,
+            'upl':       round(upl, 4),
+            'upl_pct':   round(upl_pct * 100, 4),
             'lever':     p.get('lever', ''),
         })
     summary = ' / '.join([

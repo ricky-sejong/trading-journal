@@ -524,17 +524,20 @@ function refreshPositions(){
       var rows=d.positions.map(function(p){
         var uc=parseFloat(p.upl)>=0?'var(--green)':'var(--red)';
         var uplVal=parseFloat(p.upl);
+        var markPx=p.mark_px?parseFloat(p.mark_px).toLocaleString('ko-KR',{maximumFractionDigits:4}):'—';
+        var avgPx=p.avg_px?parseFloat(p.avg_px).toLocaleString('ko-KR',{maximumFractionDigits:4}):'—';
         return '<tr>'+
           '<td style="color:var(--yellow)">'+p.inst.replace('-USDT-SWAP','')+'</td>'+
           '<td><span class="t-side '+(p.side==='long'?'long':'short')+'">'+(p.side==='long'?'LONG':'SHORT')+'</span></td>'+
           '<td>'+p.size+'</td>'+
-          '<td>'+parseFloat(p.avg_px).toLocaleString()+'</td>'+
+          '<td style="color:var(--muted2)">'+avgPx+'</td>'+
+          '<td style="color:var(--text)">'+markPx+'</td>'+
           '<td>'+p.lever+'x</td>'+
           '<td style="color:'+uc+'">'+(uplVal>=0?'+':'')+uplVal.toFixed(2)+' USDT</td>'+
-          '<td style="color:'+uc+'">'+(parseFloat(p.upl_pct)*100).toFixed(2)+'%</td>'+
+          '<td style="color:'+uc+'">'+(p.upl_pct>=0?'+':'')+parseFloat(p.upl_pct).toFixed(2)+'%</td>'+
         '</tr>';
       }).join('');
-      document.getElementById('pos-result').innerHTML='<table class="pos-table"><thead><tr><th>INSTRUMENT</th><th>SIDE</th><th>SIZE</th><th>ENTRY</th><th>LEV</th><th>PNL</th><th>RETURN</th></tr></thead><tbody>'+rows+'</tbody></table>';
+      document.getElementById('pos-result').innerHTML='<table class="pos-table"><thead><tr><th>INSTRUMENT</th><th>SIDE</th><th>SIZE</th><th>ENTRY</th><th>MARK</th><th>LEV</th><th>PNL</th><th>RETURN</th></tr></thead><tbody>'+rows+'</tbody></table>';
       ['tick-pos','tick-pos2'].forEach(function(id){document.getElementById(id).textContent=d.summary;});
     }).catch(function(){});
 }
