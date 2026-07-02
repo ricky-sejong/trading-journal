@@ -390,10 +390,14 @@ class PositionGuardian:
         }
 
     def _calc_dynamic_sl(self, pos, analysis, pos_key):
-        # OKX 필드명 매핑
-        side  = pos.get("posSide", "long")   # 'long' or 'short'
-        entry = float(pos.get("avgPx", 0))
-        mark  = float(pos.get("markPx", analysis["last_price"]))
+        # OKX 필드명 매핑 (빈 문자열 방어)
+        side  = pos.get("posSide", "long")
+        try:
+            entry = float(pos.get("avgPx", 0) or 0)
+            mark  = float(pos.get("markPx", 0) or analysis["last_price"])
+        except (ValueError, TypeError):
+            entry = analysis["last_price"]
+            mark  = analysis["last_price"]
         cfg   = self.cfg
         struct = analysis["structure"]
 
@@ -477,9 +481,12 @@ class PositionGuardian:
         return new_sl, st
 
     def _check_emergency_exit(self, pos):
-        # OKX: margin → 'margin', unrealizedPnl → 'upl'
-        margin = float(pos.get("margin", 0))
-        upl    = float(pos.get("upl", 0))
+        # OKX가 빈 문자열을 보내는 경우 방어 처리
+        try:
+            margin = float(pos.get("margin", 0) or 0)
+            upl    = float(pos.get("upl", 0) or 0)
+        except (ValueError, TypeError):
+            return False
         if margin <= 0:
             return False
         loss_pct = (-upl / margin * 100) if upl < 0 else 0
@@ -520,8 +527,12 @@ class PositionGuardian:
                 continue
 
             new_sl, st = self._calc_dynamic_sl(pos, analysis, pos_key)
-            entry = float(pos.get("avgPx", 0))
-            mark  = float(pos.get("markPx", analysis["last_price"]))
+            try:
+                entry = float(pos.get("avgPx", 0) or 0)
+                mark  = float(pos.get("markPx", 0) or analysis["last_price"])
+            except (ValueError, TypeError):
+                entry = analysis["last_price"]
+                mark  = analysis["last_price"]
             lever = pos.get("lever", "?")
 
             dir_icon   = "🟢" if side=="long" else "🔴"
