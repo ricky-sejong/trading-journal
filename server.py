@@ -249,6 +249,19 @@ try:
 except Exception as e:
     print(f'[DB] init error: {e}')
 
+# ── Position Guardian 백그라운드 실행 ─────────────────────
+def run_guardian():
+    try:
+        from position_guardian import PositionGuardian, load_config as guardian_cfg
+        print('[Guardian] OKX Position Guardian 시작...')
+        PositionGuardian(guardian_cfg()).run()
+    except ImportError:
+        print('[Guardian] position_guardian.py 없음 — 건너뜀')
+    except Exception as e:
+        print(f'[Guardian] 오류: {e}')
+
+threading.Thread(target=run_guardian, daemon=True).start()
+
 # ── Flask 라우트 ──────────────────────────────────────────
 @app.route('/')
 def index():
