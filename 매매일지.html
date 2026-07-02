@@ -1,0 +1,663 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>코인 선물 매매일지</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f5f5f0;color:#1a1a18;min-height:100vh}
+.wrap{max-width:820px;margin:0 auto;padding:1.5rem 1rem 4rem}
+.hdr{text-align:center;padding:1.5rem 0 1rem;border-bottom:1px solid #e0ddd5;margin-bottom:1.5rem}
+.hdr h1{font-size:22px;font-weight:500}
+.hdr p{font-size:13px;color:#888780;margin-top:4px}
+.tabs{justify-content:center;display:flex;gap:8px;margin-bottom:1.5rem;flex-wrap:wrap}
+.tab{padding:6px 16px;border:1px solid #c8c5bc;border-radius:8px;font-size:13px;cursor:pointer;background:transparent;color:#888780}
+.tab.active{background:#e8e5dc;color:#1a1a18;font-weight:500}
+.sec{display:none}.sec.active{display:block}
+.banner{display:flex;flex-wrap:wrap;gap:16px;align-items:center;background:#eceae2;border-radius:12px;padding:1rem 1.25rem;margin-bottom:1.25rem}
+.bi{display:flex;flex-direction:column;gap:3px}
+.bi-label{font-size:11px;color:#888780}
+.bi-val{font-size:18px;font-weight:500}
+.bi-val.pos{color:#1D9E75}.bi-val.neg{color:#E24B4A}
+.bdiv{width:1px;height:36px;background:#d0cdc4;flex-shrink:0}
+.mrow{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px;margin-bottom:1.25rem}
+.mc{background:#eceae2;border-radius:8px;padding:.9rem 1rem}
+.ml{font-size:11px;color:#888780;margin-bottom:5px}
+.mv{font-size:18px;font-weight:500}
+.mv.pos{color:#1D9E75}.mv.neg{color:#E24B4A}
+.ptabs{display:flex;gap:6px;margin-bottom:1rem}
+.ptab{padding:4px 14px;border:1px solid #c8c5bc;border-radius:8px;font-size:12px;cursor:pointer;background:transparent;color:#888780}
+.ptab.active{background:#e8e5dc;color:#1a1a18;font-weight:500}
+.cwrap{position:relative;width:100%;height:200px;margin-bottom:1.25rem}
+.stitle{font-size:14px;font-weight:500;color:#888780;margin-bottom:10px}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{text-align:left;padding:7px 10px;color:#888780;font-weight:400;border-bottom:1px solid #e0ddd5}
+td{padding:9px 10px;border-bottom:1px solid #e0ddd5;vertical-align:middle}
+tr:last-child td{border-bottom:none}
+.badge{display:inline-block;font-size:11px;padding:2px 8px;border-radius:8px;font-weight:500}
+.badge.pos{background:#E1F5EE;color:#0F6E56}.badge.neg{background:#FCEBEB;color:#A32D2D}.badge.z{background:#e8e5dc;color:#888780}
+.act-btn{font-size:11px;color:#888780;cursor:pointer;border:none;background:none;padding:2px 6px;border-radius:4px;margin-right:2px}
+.act-btn:hover{color:#1a1a18}.act-btn.del:hover{color:#E24B4A}
+.empty{text-align:center;padding:3rem 1rem;color:#888780;font-size:14px}
+.fcard{background:#fff;border:1px solid #e0ddd5;border-radius:12px;padding:1.25rem;margin-bottom:1.25rem}
+.fcard h2{font-size:15px;font-weight:500;margin-bottom:1rem}
+.edit-badge{display:inline-block;font-size:11px;padding:2px 10px;border-radius:8px;background:#fff3cd;color:#856404;margin-left:8px;font-weight:400;vertical-align:middle}
+.fgrid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.fg{display:flex;flex-direction:column;gap:4px}
+.fg.full{grid-column:1/-1}
+.fg label{font-size:12px;color:#888780}
+.fg input,.fg textarea{font-size:14px;border-radius:8px;border:1px solid #c8c5bc;padding:8px 10px;background:#fff;color:#1a1a18;outline:none;width:100%}
+.fg input:focus,.fg textarea:focus{border-color:#888780}
+.fg textarea{resize:vertical;min-height:60px}
+.prev{grid-column:1/-1;background:#eceae2;border-radius:8px;padding:.75rem 1rem;font-size:13px;color:#888780;min-height:38px;display:flex;align-items:center}
+.btn{padding:8px 20px;border-radius:8px;font-size:14px;cursor:pointer;border:1px solid #c8c5bc;background:transparent;color:#1a1a18}
+.btn.p{background:#1a1a18;color:#fff;border-color:transparent}
+.btn.cancel{color:#888780}
+.btn:hover{background:#e8e5dc}.btn.p:hover{opacity:.85;background:#1a1a18}
+.brow{display:flex;gap:8px;margin-top:1rem}
+.cal-nav{display:flex;align-items:center;gap:12px;margin-bottom:12px}
+.cal-nav button{padding:4px 12px;border:1px solid #c8c5bc;border-radius:8px;font-size:13px;cursor:pointer;background:transparent}
+.cal-nav span{font-size:15px;font-weight:500;min-width:130px;text-align:center}
+.cal-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:3px}
+.cal-dow{text-align:center;font-size:11px;color:#888780;padding:4px 0}
+.cal-cell{border-radius:8px;min-height:56px;padding:5px 6px;display:flex;flex-direction:column;gap:2px;border:1px solid transparent;cursor:default}
+.cal-cell.has-data{border-color:#e0ddd5;background:#fff;cursor:pointer}
+.cal-cell.has-data:hover{border-color:#888780}
+.cal-cell.today{border-color:#c8c5bc}
+.cal-day{font-size:11px;color:#888780}
+.cal-pnl{font-size:12px;font-weight:500;margin-top:auto}
+.cal-pnl.pos{color:#1D9E75}.cal-pnl.neg{color:#E24B4A}
+.cal-amt{font-size:11px}
+.cal-amt.pos{color:#1D9E75}.cal-amt.neg{color:#E24B4A}
+.modal-bg{display:none;position:fixed;inset:0;background:rgba(0,0,0,0.35);z-index:100;align-items:center;justify-content:center}
+.modal-bg.open{display:flex}
+.modal{background:#fff;border-radius:14px;padding:1.5rem;width:100%;max-width:480px;margin:1rem;max-height:90vh;overflow-y:auto}
+.modal h2{font-size:16px;font-weight:500;margin-bottom:1.25rem}
+/* 매매내역 탭 */
+.conn-bar{display:flex;flex-wrap:wrap;align-items:center;gap:10px;background:#eceae2;border-radius:10px;padding:.75rem 1rem;margin-bottom:1.25rem;font-size:13px}
+.conn-dot{width:8px;height:8px;border-radius:50%;background:#ccc;flex-shrink:0}
+.conn-dot.on{background:#1D9E75}.conn-dot.off{background:#E24B4A}.conn-dot.spin{background:#f0a500;animation:pulse 1s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+.conn-status{color:#888780;flex:1;font-size:12px}
+.sm-btn{padding:4px 12px;border-radius:7px;font-size:12px;cursor:pointer;border:1px solid #c8c5bc;background:#fff}
+.sm-btn:hover{background:#e8e5dc}
+.today-card{background:#fff;border:1px solid #e0ddd5;border-radius:12px;padding:1.25rem;margin-bottom:1.25rem}
+.today-card h2{font-size:15px;font-weight:500;margin-bottom:1rem;display:flex;align-items:center;gap:8px}
+.live-badge{font-size:11px;padding:2px 8px;border-radius:6px;background:#FFF3CD;color:#856404;font-weight:400}
+.today-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:8px;margin-bottom:1rem}
+.ts{background:#f5f5f0;border-radius:8px;padding:.65rem .85rem}
+.ts-label{font-size:11px;color:#888780;margin-bottom:3px}
+.ts-val{font-size:15px;font-weight:500}
+.last-sync{font-size:11px;color:#888780;margin-top:.5rem}
+.trade-list{display:flex;flex-direction:column;gap:4px;max-height:280px;overflow-y:auto}
+.trade-item{font-size:12px;padding:6px 10px;border-radius:7px;background:#f5f5f0;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.trade-time{color:#888780;min-width:55px;font-variant-numeric:tabular-nums}
+.trade-inst{font-weight:500;min-width:50px}
+.trade-badge{padding:1px 7px;border-radius:5px;font-size:11px}
+.trade-badge.long{background:#E1F5EE;color:#0F6E56}
+.trade-badge.short{background:#FCEBEB;color:#A32D2D}
+.trade-pnl{margin-left:auto;font-weight:500}
+.spinner{display:inline-block;width:13px;height:13px;border:2px solid #c8c5bc;border-top-color:#1a1a18;border-radius:50%;animation:spin .7s linear infinite;vertical-align:middle;margin-right:5px}
+@keyframes spin{to{transform:rotate(360deg)}}
+.day-stat-row{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:1rem}
+.day-stat{background:#f5f5f0;border-radius:8px;padding:.65rem .85rem}
+.day-stat-label{font-size:11px;color:#888780;margin-bottom:3px}
+.day-stat-val{font-size:16px;font-weight:500}
+.day-modal-actions{display:flex;gap:8px;margin-top:1rem;padding-top:1rem;border-top:1px solid #e0ddd5}
+.trades-title{font-size:12px;font-weight:500;color:#888780;margin-bottom:8px}
+</style>
+</head>
+<body>
+<div class="wrap">
+<div class="hdr">
+  <h1>코인 선물 매매일지</h1>
+  <p>OKX 자동 연동 · 매일 자정 자동 저장</p>
+</div>
+<div class="tabs">
+  <button class="tab active" onclick="switchTab('dashboard')">대시보드</button>
+  <button class="tab" onclick="switchTab('calendar')">PNL 달력</button>
+  <button class="tab" onclick="switchTab('history')">전체 기록</button>
+  <button class="tab" onclick="switchTab('trades')">매매내역</button>
+</div>
+
+<div id="s-dashboard" class="sec active">
+  <div class="banner" id="banner"></div>
+  <div class="mrow" id="mrow"></div>
+  <div class="ptabs">
+    <button class="ptab active" onclick="switchPeriod('daily')">일별 잔고</button>
+    <button class="ptab" onclick="switchPeriod('weekly')">주별 잔고</button>
+    <button class="ptab" onclick="switchPeriod('monthly')">월별 잔고</button>
+  </div>
+  <div class="cwrap"><canvas id="chart"></canvas></div>
+  <div id="ptable"></div>
+</div>
+
+<div id="s-calendar" class="sec">
+  <div class="cal-nav">
+    <button onclick="calMove(-1)">&#8592;</button>
+    <span id="cal-title"></span>
+    <button onclick="calMove(1)">&#8594;</button>
+  </div>
+  <div class="cal-grid" id="cal-grid"></div>
+</div>
+
+<div id="s-history" class="sec"><div id="htable"></div></div>
+
+<!-- 매매내역 탭 -->
+<div id="s-trades" class="sec">
+  <div class="conn-bar">
+    <div class="conn-dot" id="conn-dot"></div>
+    <span class="conn-status" id="conn-status">서버 확인 중...</span>
+    <button class="sm-btn" onclick="testConn()">연결 테스트</button>
+    
+    <button class="sm-btn" onclick="triggerBackfill()">최근 7일 동기화</button>
+  </div>
+
+  <!-- 오늘 실시간 -->
+  <div class="today-card">
+    <h2>오늘 <span class="live-badge" id="today-badge">자동 갱신</span></h2>
+    <div class="today-stats" id="today-stats">
+      <div class="ts"><div class="ts-label">거래 횟수</div><div class="ts-val" id="t-cnt">—</div></div>
+      <div class="ts"><div class="ts-label">손익</div><div class="ts-val" id="t-pnl">—</div></div>
+      <div class="ts"><div class="ts-label">수익률</div><div class="ts-val" id="t-pct">—</div></div>
+      <div class="ts"><div class="ts-label">현재 잔고</div><div class="ts-val" id="t-bal">—</div></div>
+    </div>
+    <div class="trades-title" id="today-trades-title"></div>
+    <div class="trade-list" id="today-trades"></div>
+    <div class="last-sync" id="last-sync-txt"></div>
+  </div>
+
+  <!-- 현재 포지션 -->
+  <div class="fcard">
+    <h2>현재 보유 포지션</h2>
+    <div id="pos-result"><span style="color:#888780;font-size:13px">잠시 후 자동으로 불러옵니다...</span></div>
+  </div>
+</div>
+</div>
+
+<!-- API 키 설정 모달 -->
+<div class="modal-bg" id="api-modal">
+  <div class="modal">
+    <h2>OKX API 키 설정</h2>
+    <p style="font-size:12px;color:#888780;margin-bottom:1rem">읽기 전용 권한(Trade History, Account)만 부여하세요.</p>
+    <div class="fgrid">
+      <div class="fg full"><label>API Key</label><input type="text" id="inp-key"></div>
+      <div class="fg full"><label>Secret Key</label><input type="password" id="inp-secret"></div>
+      <div class="fg full"><label>Passphrase</label><input type="password" id="inp-pass"></div>
+    </div>
+    <div class="brow">
+      <button class="btn p" onclick="saveApiKey()">저장 후 즉시 동기화</button>
+      <button class="btn cancel" onclick="closeApiModal()">취소</button>
+    </div>
+  </div>
+</div>
+
+<!-- 수정 모달 -->
+<div class="modal-bg" id="edit-modal">
+  <div class="modal">
+    <h2>기록 수정 <span class="edit-badge" id="edit-date-label"></span></h2>
+    <div class="fgrid">
+      <div class="fg"><label>날짜</label><input type="date" id="e-date"></div>
+      <div class="fg" style="visibility:hidden"><label>x</label><input type="text"></div>
+      <div class="fg"><label>시작 잔고 (USDT)</label><input type="number" id="e-open" step="1" oninput="calcEditPrev()"></div>
+      <div class="fg"><label>마감 잔고 (USDT)</label><input type="number" id="e-close" step="1" oninput="calcEditPrev()"></div>
+      <div class="prev" id="e-prev">잔고를 입력하면 수익률이 계산됩니다</div>
+      <div class="fg full"><label>마감 포지션</label><input type="text" id="e-pos"></div>
+      <div class="fg full"><label>메모</label><textarea id="e-memo"></textarea></div>
+    </div>
+    <div class="brow">
+      <button class="btn p" onclick="saveEdit()">저장</button>
+      <button class="btn cancel" onclick="closeEditModal()">취소</button>
+    </div>
+  </div>
+</div>
+
+<!-- 날짜 상세 모달 -->
+<div class="modal-bg" id="day-modal">
+  <div class="modal">
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:1rem">
+      <div>
+        <div style="font-size:15px;font-weight:500" id="day-modal-date"></div>
+        <div style="font-size:12px;color:#888780;margin-top:2px">일별 매매 상세</div>
+      </div>
+    </div>
+    <div class="day-stat-row" id="day-stats"></div>
+    <div id="day-trades-section"></div>
+    <div class="day-modal-actions" id="day-modal-actions"></div>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<script>
+var SERVER='http://localhost:5000';
+var ch=null, period='daily', calYear, calMonth, editingId=null;
+var journalData=[];
+var todayTimer=null, posTimer=null;
+var n=new Date(); calYear=n.getFullYear(); calMonth=n.getMonth();
+
+function todayKST(){var d=new Date();return new Date(d.getTime()+9*3600000).toISOString().split('T')[0];}
+function fn(n){if(n==null)return'—';return Math.round(n).toLocaleString('ko-KR');}
+function fd(s){return s.replace(/-/g,'.');}
+function sg(v){return v>0?'+':'';}
+function pc(v){return v>0?'pos':v<0?'neg':'z';}
+
+function wk(s){var d=new Date(s),j=new Date(d.getFullYear(),0,1);var w=Math.ceil(((d-j)/86400000+j.getDay()+1)/7);return d.getFullYear()+'-W'+String(w).padStart(2,'0');}
+function wkL(s){var d=new Date(s),j=new Date(d.getFullYear(),0,1);var w=Math.ceil(((d-j)/86400000+j.getDay()+1)/7);return d.getFullYear()+'년 '+w+'주차';}
+function mk(s){return s.slice(0,7);}
+function mlb(s){return s.slice(0,4)+'년 '+parseInt(s.slice(5,7))+'월';}
+
+function group(data,kf,lf){
+  var m={};
+  data.forEach(function(d){var k=kf(d.date);if(!m[k])m[k]={key:k,label:lf(d.date),items:[]};m[k].items.push(d);});
+  return Object.values(m).map(function(g){
+    var it=g.items,sO=it[0].open,eC=it[it.length-1].close,p=(eC-sO)/sO*100,wins=it.filter(function(e){return e.pnl>0;}).length;
+    return{key:g.key,label:g.label,items:it,startOpen:sO,endClose:eC,pnl:p,wins:wins,total:it.length};
+  });
+}
+
+/* ── 서버에서 일지 로드 ── */
+function loadJournal(cb){
+  fetch(SERVER+'/api/journal',{signal:AbortSignal.timeout(3000)})
+    .then(function(r){return r.json();})
+    .then(function(d){journalData=d.data||[];if(cb)cb(journalData);})
+    .catch(function(){if(cb)cb(journalData);});
+}
+
+/* ── 연결 상태 ── */
+function setConn(state,msg){
+  var dot=document.getElementById('conn-dot');
+  dot.className='conn-dot '+(state==='on'?'on':state==='spin'?'spin':'off');
+  document.getElementById('conn-status').textContent=msg;
+}
+
+function checkConn(){
+  setConn('spin','서버 확인 중...');
+  fetch(SERVER+'/api/status',{signal:AbortSignal.timeout(3000)})
+    .then(function(r){return r.json();})
+    .then(function(d){
+      if(d.has_key)setConn('on','서버 연결됨 · OKX 자동 갱신 중');
+      else setConn('off','서버 연결됨 · OKX 환경변수를 확인해주세요');
+    })
+    .catch(function(){setConn('off','서버 미연결 — server.py를 실행해주세요');});
+}
+
+function testConn(){
+  setConn('spin','테스트 중...');
+  fetch(SERVER+'/api/test')
+    .then(function(r){return r.json();})
+    .then(function(d){setConn(d.ok?'on':'off',d.ok?'OKX 연결 성공!':'연결 실패: '+d.msg);})
+    .catch(function(){setConn('off','서버 미연결');});
+}
+
+/* ── 오늘 실시간 데이터 ── */
+function refreshToday(){
+  fetch(SERVER+'/api/daily?date='+todayKST(),{signal:AbortSignal.timeout(8000)})
+    .then(function(r){return r.json();})
+    .then(function(d){
+      if(!d.ok)return;
+      var now=new Date().toLocaleTimeString('ko-KR',{hour:'2-digit',minute:'2-digit'});
+      if(d.empty||!d.trade_count){
+        document.getElementById('t-cnt').textContent='0회';
+        document.getElementById('t-pnl').textContent='—';
+        document.getElementById('t-pct').textContent='—';
+        document.getElementById('today-trades-title').textContent='';
+        document.getElementById('today-trades').innerHTML='<div style="font-size:13px;color:#888780;padding:.5rem 0">오늘 체결된 거래가 없어요</div>';
+      } else {
+        var ac=d.pnl_usdt>=0?'#1D9E75':'#E24B4A';
+        document.getElementById('t-cnt').textContent=d.trade_count+'회';
+        document.getElementById('t-pnl').innerHTML='<span style="color:'+ac+'">'+sg(d.pnl_usdt)+fn(d.pnl_usdt)+' USDT</span>';
+        document.getElementById('t-pct').innerHTML='<span style="color:'+ac+'">'+sg(d.pnl_pct)+d.pnl_pct.toFixed(2)+'%</span>';
+        document.getElementById('today-trades-title').textContent='거래 내역';
+        document.getElementById('today-trades').innerHTML=(d.trades||[]).map(function(t){
+          var tc=t.pnl>=0?'#1D9E75':'#E24B4A';
+          var sc=t.pos_side==='long'?'long':'short';
+          return '<div class="trade-item">'+
+            '<span class="trade-time">'+t.time+'</span>'+
+            '<span class="trade-inst">'+t.inst+'</span>'+
+            '<span class="trade-badge '+sc+'">'+(sc==='long'?'롱':'숏')+'</span>'+
+            '<span style="color:#888780;font-size:11px">'+t.sz+'개 @ '+parseFloat(t.price).toLocaleString()+'</span>'+
+            '<span class="trade-pnl" style="color:'+tc+'">'+(t.pnl>=0?'+':'')+parseFloat(t.pnl).toFixed(2)+' U</span>'+
+          '</div>';
+        }).join('');
+      }
+      /* 잔고 */
+      fetch(SERVER+'/api/balance',{signal:AbortSignal.timeout(5000)})
+        .then(function(r){return r.json();})
+        .then(function(b){if(b.ok)document.getElementById('t-bal').textContent=fn(b.balance)+' USDT';});
+      document.getElementById('last-sync-txt').textContent='마지막 갱신: '+now;
+    })
+    .catch(function(){});
+}
+
+function refreshPositions(){
+  fetch(SERVER+'/api/positions',{signal:AbortSignal.timeout(8000)})
+    .then(function(r){return r.json();})
+    .then(function(d){
+      if(!d.ok){document.getElementById('pos-result').innerHTML='<span style="color:#888780;font-size:13px">포지션 조회 실패</span>';return;}
+      if(!d.positions.length){document.getElementById('pos-result').innerHTML='<span style="color:#888780;font-size:13px">현재 보유 포지션 없음</span>';return;}
+      var rows=d.positions.map(function(p){
+        var uc=parseFloat(p.upl)>=0?'#1D9E75':'#E24B4A';
+        return '<tr>'+
+          '<td>'+p.inst.replace('-USDT-SWAP','')+'</td>'+
+          '<td><span class="badge '+(p.side==='long'?'pos':'neg')+'">'+(p.side==='long'?'롱':'숏')+'</span></td>'+
+          '<td>'+p.size+'</td>'+
+          '<td>'+parseFloat(p.avg_px).toLocaleString()+'</td>'+
+          '<td>'+p.lever+'x</td>'+
+          '<td style="color:'+uc+'">'+parseFloat(p.upl).toFixed(2)+' U</td>'+
+          '<td style="color:'+uc+'">'+(parseFloat(p.upl_pct)*100).toFixed(2)+'%</td>'+
+        '</tr>';
+      }).join('');
+      document.getElementById('pos-result').innerHTML=
+        '<div style="overflow-x:auto"><table><thead><tr><th>종목</th><th>방향</th><th>수량</th><th>진입가</th><th>레버리지</th><th>미실현손익</th><th>수익률</th></tr></thead><tbody>'+rows+'</tbody></table></div>'+
+        '<p style="font-size:11px;color:#888780;margin-top:6px">'+d.summary+'</p>';
+    }).catch(function(){});
+}
+
+function startAutoRefresh(){
+  stopAutoRefresh();
+  refreshToday();
+  refreshPositions();
+  todayTimer=setInterval(refreshToday, 30000);   // 30초마다 오늘 거래내역
+  posTimer=setInterval(refreshPositions, 15000); // 15초마다 포지션
+}
+
+function stopAutoRefresh(){
+  if(todayTimer)clearInterval(todayTimer);
+  if(posTimer)clearInterval(posTimer);
+  todayTimer=null;posTimer=null;
+}
+
+function triggerBackfill(){
+  setConn('spin','최근 7일 동기화 중...');
+  fetch(SERVER+'/api/sync/auto',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({days:7})})
+    .then(function(r){return r.json();})
+    .then(function(d){
+      setConn('on','동기화 시작됨 — 잠시 후 대시보드가 갱신됩니다');
+      setTimeout(function(){loadJournal(function(){renderAll();renderCalendar();});checkConn();},3000);
+    }).catch(function(){setConn('off','서버 미연결');});
+}
+
+/* ── API 키 모달 ── */
+function openApiModal(){document.getElementById('api-modal').classList.add('open');}
+function closeApiModal(){document.getElementById('api-modal').classList.remove('open');}
+document.getElementById('api-modal').addEventListener('click',function(e){if(e.target===this)closeApiModal();});
+
+function saveApiKey(){
+  var key=document.getElementById('inp-key').value.trim();
+  var secret=document.getElementById('inp-secret').value.trim();
+  var pass=document.getElementById('inp-pass').value.trim();
+  if(!key||!secret||!pass){alert('모든 항목을 입력해주세요.');return;}
+  fetch(SERVER+'/api/status',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({api_key:key,secret_key:secret,passphrase:pass})})
+    .then(function(r){return r.json();})
+    .then(function(d){if(d.ok){closeApiModal();setConn('spin','API 키 저장됨 — 자동 동기화 시작...');setTimeout(function(){checkConn();loadJournal(function(){renderAll();renderCalendar();});},3000);}})
+    .catch(function(){alert('서버에 연결할 수 없어요.');});
+}
+
+/* ── 수정 모달 ── */
+function openEdit(id){
+  var entry=journalData.find(function(d){return d.id===id;});
+  if(!entry)return;
+  editingId=id;
+  document.getElementById('edit-date-label').textContent=fd(entry.date);
+  document.getElementById('e-date').value=entry.date;
+  document.getElementById('e-open').value=entry.open;
+  document.getElementById('e-close').value=entry.close;
+  document.getElementById('e-pos').value=entry.pos||'';
+  document.getElementById('e-memo').value=entry.memo||'';
+  calcEditPrev();
+  closeDayModal();
+  document.getElementById('edit-modal').classList.add('open');
+}
+
+function closeEditModal(){document.getElementById('edit-modal').classList.remove('open');editingId=null;}
+document.getElementById('edit-modal').addEventListener('click',function(e){if(e.target===this)closeEditModal();});
+
+function calcEditPrev(){
+  var o=parseFloat(document.getElementById('e-open').value);
+  var c=parseFloat(document.getElementById('e-close').value);
+  var el=document.getElementById('e-prev');
+  if(isNaN(o)||isNaN(c)){el.textContent='잔고를 입력하면 수익률이 계산됩니다';el.style.color='#888780';return;}
+  var p=(c-o)/o*100,diff=c-o;
+  el.style.color=p>=0?'#1D9E75':'#E24B4A';
+  el.innerHTML='수익률 <strong>'+sg(p)+p.toFixed(2)+'%</strong> &nbsp;|&nbsp; 손익 '+sg(diff)+fn(diff)+' USDT';
+}
+
+function saveEdit(){
+  if(!editingId)return;
+  var o=parseFloat(document.getElementById('e-open').value);
+  var c=parseFloat(document.getElementById('e-close').value);
+  var pos=document.getElementById('e-pos').value.trim();
+  var memo=document.getElementById('e-memo').value.trim();
+  if(isNaN(o)||isNaN(c)){alert('시작/마감 잔고를 입력해주세요.');return;}
+  fetch(SERVER+'/api/journal/'+editingId,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({open:o,close:c,pos:pos,memo:memo})})
+    .then(function(r){return r.json();})
+    .then(function(d){
+      if(d.ok){closeEditModal();loadJournal(function(){renderAll();renderHistory();renderCalendar();});}
+    }).catch(function(){alert('수정 실패: 서버를 확인해주세요.');});
+}
+
+/* ── 날짜 상세 모달 ── */
+function openDayModal(id){
+  var entry=journalData.find(function(d){return d.id===id;});
+  if(!entry)return;
+  var amt=Math.round(entry.close-entry.open);
+  var pnl=entry.pnl||0;
+  var ac=amt>=0?'#1D9E75':'#E24B4A';
+  document.getElementById('day-modal-date').textContent=fd(entry.date);
+  document.getElementById('day-stats').innerHTML=
+    '<div class="day-stat"><div class="day-stat-label">수익률</div><div class="day-stat-val" style="color:'+ac+'">'+sg(pnl)+pnl.toFixed(2)+'%</div></div>'+
+    '<div class="day-stat"><div class="day-stat-label">손익</div><div class="day-stat-val" style="color:'+ac+'">'+sg(amt)+fn(Math.abs(amt))+' USDT</div></div>'+
+    '<div class="day-stat"><div class="day-stat-label">시작 잔고</div><div class="day-stat-val">'+fn(entry.open)+' USDT</div></div>'+
+    '<div class="day-stat"><div class="day-stat-label">마감 잔고</div><div class="day-stat-val">'+fn(entry.close)+' USDT</div></div>';
+  var th='';
+  if(entry.trades&&entry.trades.length){
+    th='<div class="trades-title">거래 내역 ('+entry.trades.length+'회)</div>'+
+      '<div class="trade-list">'+entry.trades.map(function(t){
+        var tc=t.pnl>=0?'#1D9E75':'#E24B4A';
+        var sc=t.side==='long'||t.pos_side==='long'?'long':'short';
+        return '<div class="trade-item">'+
+          '<span class="trade-time">'+t.time+'</span>'+
+          '<span class="trade-inst">'+t.inst+'</span>'+
+          '<span class="trade-badge '+sc+'">'+(sc==='long'?'롱':'숏')+'</span>'+
+          '<span style="color:#888780;font-size:11px">'+t.sz+'개 @ '+parseFloat(t.price).toLocaleString()+'</span>'+
+          '<span class="trade-pnl" style="color:'+tc+'">'+(t.pnl>=0?'+':'')+parseFloat(t.pnl).toFixed(2)+' U</span>'+
+        '</div>';
+      }).join('')+'</div>';
+  } else {
+    var extra='';
+    if(entry.pos)extra+='<div style="margin-top:.75rem"><div class="trades-title">마감 포지션</div><div style="font-size:13px;background:#f5f5f0;border-radius:8px;padding:.6rem .85rem">'+entry.pos+'</div></div>';
+    if(entry.memo)extra+='<div style="margin-top:.75rem"><div class="trades-title">메모</div><div style="font-size:13px;color:#888780;background:#f5f5f0;border-radius:8px;padding:.6rem .85rem">'+entry.memo+'</div></div>';
+    th=extra||'<div style="font-size:13px;color:#888780">거래 내역은 OKX 자동 동기화 시 표시됩니다.</div>';
+  }
+  document.getElementById('day-trades-section').innerHTML=th;
+  document.getElementById('day-modal-actions').innerHTML=
+    '<button class="btn p" style="font-size:13px" onclick="openEdit('+id+')">수정</button>'+
+    '<button class="btn" style="font-size:13px;color:#E24B4A;border-color:#E24B4A" onclick="delEntry('+id+')">삭제</button>'+
+    '<button class="btn cancel" style="margin-left:auto;font-size:13px" onclick="closeDayModal()">닫기</button>';
+  document.getElementById('day-modal').classList.add('open');
+}
+
+function closeDayModal(){document.getElementById('day-modal').classList.remove('open');}
+document.getElementById('day-modal').addEventListener('click',function(e){if(e.target===this)closeDayModal();});
+
+function delEntry(id){
+  if(!confirm('이 기록을 삭제할까요?'))return;
+  closeDayModal();
+  fetch(SERVER+'/api/journal/'+id,{method:'DELETE'})
+    .then(function(r){return r.json();})
+    .then(function(d){if(d.ok)loadJournal(function(){renderAll();renderHistory();renderCalendar();});})
+    .catch(function(){alert('삭제 실패: 서버를 확인해주세요.');});
+}
+
+/* ── 렌더링 ── */
+function renderBanner(data){
+  var el=document.getElementById('banner');
+  if(!data.length){el.innerHTML='<span style="font-size:13px;color:#888780">매매내역 탭에서 API를 연동하면 자동으로 기록됩니다</span>';return;}
+  var startBal=data[0].open,curBal=data[data.length-1].close;
+  var totalAmt=curBal-startBal,totalPct=(curBal-startBal)/startBal*100;
+  var wins=data.filter(function(d){return d.pnl>0;}).length;
+  var losses=data.filter(function(d){return d.pnl<0;}).length;
+  el.innerHTML=
+    '<div class="bi"><div class="bi-label">올타임 수익</div><div class="bi-val '+pc(totalAmt)+'">'+sg(totalAmt)+fn(totalAmt)+' USDT <span style="font-size:13px;font-weight:400">('+sg(totalPct)+totalPct.toFixed(2)+'%)</span></div></div>'+
+    '<div class="bdiv"></div>'+
+    '<div class="bi"><div class="bi-label">시작 잔고</div><div class="bi-val">'+fn(startBal)+' USDT</div></div>'+
+    '<div class="bdiv"></div>'+
+    '<div class="bi"><div class="bi-label">현재 잔고</div><div class="bi-val">'+fn(curBal)+' USDT</div></div>'+
+    '<div class="bdiv"></div>'+
+    '<div class="bi"><div class="bi-label">수익일 / 손실일</div><div class="bi-val"><span style="color:#1D9E75">'+wins+'일</span> / <span style="color:#E24B4A">'+losses+'일</span></div></div>';
+}
+
+function renderMetrics(data){
+  var el=document.getElementById('mrow');
+  if(!data.length){el.innerHTML='';return;}
+  var n=data.length,avg=data.reduce(function(s,d){return s+(d.pnl||0);},0)/n;
+  var maxW=Math.max.apply(null,data.map(function(d){return d.pnl||0;}));
+  var maxL=Math.min.apply(null,data.map(function(d){return d.pnl||0;}));
+  var wins=data.filter(function(d){return d.pnl>0;}).length;
+  el.innerHTML=
+    '<div class="mc"><div class="ml">평균 일수익률</div><div class="mv '+pc(avg)+'">'+sg(avg)+avg.toFixed(2)+'%</div></div>'+
+    '<div class="mc"><div class="ml">승률</div><div class="mv">'+(wins/n*100).toFixed(1)+'%</div></div>'+
+    '<div class="mc"><div class="ml">최고 수익일</div><div class="mv pos">+'+maxW.toFixed(2)+'%</div></div>'+
+    '<div class="mc"><div class="ml">최대 손실일</div><div class="mv neg">'+maxL.toFixed(2)+'%</div></div>';
+}
+
+function renderChart(data){
+  var canvas=document.getElementById('chart');
+  if(!data.length){canvas.style.display='none';return;}
+  canvas.style.display='block';
+  var labels=[],vals=[];
+  if(period==='daily'){
+    labels=[fd(data[0].date)+' 시작'].concat(data.map(function(d){return fd(d.date);}));
+    vals=[Math.round(data[0].open)].concat(data.map(function(d){return Math.round(d.close);}));
+  } else if(period==='weekly'){
+    var g=group(data,wk,wkL);
+    labels=[g[0].label+' 시작'].concat(g.map(function(x){return x.label;}));
+    vals=[Math.round(g[0].startOpen)].concat(g.map(function(x){return Math.round(x.endClose);}));
+  } else {
+    var g=group(data,mk,mlb);
+    labels=[g[0].label+' 시작'].concat(g.map(function(x){return x.label;}));
+    vals=[Math.round(g[0].startOpen)].concat(g.map(function(x){return Math.round(x.endClose);}));
+  }
+  if(ch)ch.destroy();
+  ch=new Chart(canvas,{
+    type:'line',
+    data:{labels:labels,datasets:[{label:'잔고',data:vals,borderColor:'#1D9E75',backgroundColor:'rgba(29,158,117,0.08)',borderWidth:2,pointRadius:4,pointBackgroundColor:'#1D9E75',fill:true,tension:0.3}]},
+    options:{responsive:true,maintainAspectRatio:false,
+      plugins:{legend:{display:false},tooltip:{callbacks:{label:function(ctx){return fn(ctx.parsed.y)+' USDT';}}}},
+      scales:{x:{ticks:{font:{size:10},color:'#888780',maxRotation:40,autoSkip:true},grid:{display:false}},
+              y:{ticks:{font:{size:11},color:'#888780',callback:function(v){return fn(v);}},grid:{color:'rgba(136,135,128,0.15)'}}}}
+  });
+}
+
+function renderPeriodTable(data){
+  var el=document.getElementById('ptable');
+  if(!data.length){el.innerHTML='<div class="empty">아직 기록이 없어요.<br>매매내역 탭에서 OKX를 연동하면 자동으로 기록됩니다.</div>';return;}
+  var rows='',head='',title='';
+  if(period==='daily'){
+    title='최근 7일';
+    head='<tr><th>날짜</th><th>수익률</th><th>손익</th><th>시작 잔고</th><th>마감 잔고</th><th>포지션</th></tr>';
+    rows=data.slice().reverse().slice(0,7).map(function(d){
+      var amt=Math.round(d.close-d.open);
+      return '<tr style="cursor:pointer" onclick="openDayModal('+d.id+')"><td>'+fd(d.date)+'</td><td><span class="badge '+pc(d.pnl)+'">'+sg(d.pnl)+(d.pnl||0).toFixed(2)+'%</span></td><td style="color:'+(amt>=0?'#1D9E75':'#E24B4A')+'">'+sg(amt)+fn(Math.abs(amt))+' USDT</td><td style="color:#888780">'+fn(d.open)+' USDT</td><td>'+fn(d.close)+' USDT</td><td style="font-size:12px;color:#888780">'+(d.pos||'-')+'</td></tr>';
+    }).join('');
+  } else if(period==='weekly'){
+    title='주별 통계';
+    head='<tr><th>주차</th><th>수익률</th><th>손익</th><th>거래일</th><th>승률</th><th>시작</th><th>마감</th></tr>';
+    rows=group(data,wk,wkL).reverse().map(function(g){
+      var amt=Math.round(g.endClose-g.startOpen);
+      return '<tr><td>'+g.label+'</td><td><span class="badge '+pc(g.pnl)+'">'+sg(g.pnl)+(g.pnl||0).toFixed(2)+'%</span></td><td style="color:'+(amt>=0?'#1D9E75':'#E24B4A')+'">'+sg(amt)+fn(Math.abs(amt))+' USDT</td><td>'+g.total+'일</td><td>'+(g.wins/g.total*100).toFixed(0)+'%</td><td style="color:#888780">'+fn(g.startOpen)+' U</td><td>'+fn(g.endClose)+' U</td></tr>';
+    }).join('');
+  } else {
+    title='월별 통계';
+    head='<tr><th>월</th><th>수익률</th><th>손익</th><th>거래일</th><th>승률</th><th>시작</th><th>마감</th></tr>';
+    rows=group(data,mk,mlb).reverse().map(function(g){
+      var amt=Math.round(g.endClose-g.startOpen);
+      return '<tr><td>'+g.label+'</td><td><span class="badge '+pc(g.pnl)+'">'+sg(g.pnl)+(g.pnl||0).toFixed(2)+'%</span></td><td style="color:'+(amt>=0?'#1D9E75':'#E24B4A')+'">'+sg(amt)+fn(Math.abs(amt))+' USDT</td><td>'+g.total+'일</td><td>'+(g.wins/g.total*100).toFixed(0)+'%</td><td style="color:#888780">'+fn(g.startOpen)+' U</td><td>'+fn(g.endClose)+' U</td></tr>';
+    }).join('');
+  }
+  el.innerHTML='<p class="stitle">'+title+'</p><div style="overflow-x:auto"><table><thead>'+head+'</thead><tbody>'+rows+'</tbody></table></div>';
+}
+
+function renderCalendar(){
+  var data=journalData, map={};
+  data.forEach(function(d){map[d.date]=d;});
+  var months=['1월','2월','3월','4월','5월','6월','7월','8월','9월','10월','11월','12월'];
+  document.getElementById('cal-title').textContent=calYear+'년 '+months[calMonth];
+  var firstDay=new Date(calYear,calMonth,1).getDay();
+  var daysInMonth=new Date(calYear,calMonth+1,0).getDate();
+  var todayStr=todayKST();
+  var dows=['일','월','화','수','목','금','토'];
+  var html=dows.map(function(d){return '<div class="cal-dow">'+d+'</div>';}).join('');
+  for(var i=0;i<firstDay;i++)html+='<div class="cal-cell"></div>';
+  for(var day=1;day<=daysInMonth;day++){
+    var mm=String(calMonth+1).padStart(2,'0'),dd=String(day).padStart(2,'0');
+    var dateStr=calYear+'-'+mm+'-'+dd;
+    var entry=map[dateStr];
+    var isToday=dateStr===todayStr;
+    var cls='cal-cell'+(entry?' has-data':'')+(isToday?' today':'');
+    var onclick=entry?'onclick="openDayModal('+entry.id+')"':'';
+    var inner='<div class="cal-day">'+day+'</div>';
+    if(entry){
+      var amt=Math.round(entry.close-entry.open);
+      var pct=entry.pnl||0;
+      var cls2=amt>=0?'pos':'neg';
+      inner+='<div class="cal-pnl '+cls2+'">'+sg(amt)+fn(Math.abs(amt))+'</div>';
+      inner+='<div class="cal-amt '+cls2+'">'+sg(pct)+pct.toFixed(1)+'%</div>';
+    }
+    html+='<div class="'+cls+'" '+onclick+'>'+inner+'</div>';
+  }
+  document.getElementById('cal-grid').innerHTML=html;
+}
+
+function calMove(dir){calMonth+=dir;if(calMonth>11){calMonth=0;calYear++;}if(calMonth<0){calMonth=11;calYear--;}renderCalendar();}
+
+function renderHistory(){
+  var data=journalData;
+  var el=document.getElementById('htable');
+  if(!data.length){el.innerHTML='<div class="empty">아직 기록이 없어요.</div>';return;}
+  var rows=data.slice().reverse().map(function(d){
+    var amt=Math.round(d.close-d.open);
+    return '<tr><td>'+fd(d.date)+'</td>'+
+      '<td><span class="badge '+pc(d.pnl)+'">'+sg(d.pnl)+(d.pnl||0).toFixed(2)+'%</span></td>'+
+      '<td style="color:'+(amt>=0?'#1D9E75':'#E24B4A')+'">'+sg(amt)+fn(Math.abs(amt))+' USDT</td>'+
+      '<td style="color:#888780">'+fn(d.open)+' USDT</td>'+
+      '<td>'+fn(d.close)+' USDT</td>'+
+      '<td style="font-size:12px;max-width:100px">'+(d.pos||'-')+'</td>'+
+      '<td style="font-size:12px;color:#888780;max-width:100px">'+(d.memo||'')+'</td>'+
+      '<td style="white-space:nowrap">'+
+        '<button class="act-btn" onclick="openEdit('+d.id+')">수정</button>'+
+        '<button class="act-btn del" onclick="delEntry('+d.id+')">삭제</button>'+
+      '</td></tr>';
+  }).join('');
+  el.innerHTML='<div style="overflow-x:auto"><table><thead><tr><th>날짜</th><th>수익률</th><th>손익</th><th>시작 잔고</th><th>마감 잔고</th><th>포지션</th><th>메모</th><th></th></tr></thead><tbody>'+rows+'</tbody></table></div>';
+}
+
+function renderAll(){
+  var data=journalData;
+  renderBanner(data);renderMetrics(data);renderChart(data);renderPeriodTable(data);
+}
+
+function switchTab(tab){
+  var tabs=['dashboard','calendar','history','trades'];
+  document.querySelectorAll('.tab').forEach(function(t,i){t.classList.toggle('active',tabs[i]===tab);});
+  document.querySelectorAll('.sec').forEach(function(s){s.classList.remove('active');});
+  document.getElementById('s-'+tab).classList.add('active');
+  if(tab==='dashboard'){loadJournal(function(){renderAll();});}
+  if(tab==='calendar'){loadJournal(function(){renderCalendar();});}
+  if(tab==='history'){loadJournal(function(){renderHistory();});}
+  if(tab==='trades'){checkConn();startAutoRefresh();}
+  if(tab!=='trades')stopAutoRefresh();
+}
+
+function switchPeriod(p){
+  period=p;
+  document.querySelectorAll('.ptab').forEach(function(t,i){t.classList.toggle('active',['daily','weekly','monthly'][i]===p);});
+  renderChart(journalData);renderPeriodTable(journalData);
+}
+
+/* ── 초기화 ── */
+loadJournal(function(){renderAll();});
+</script>
+</body>
+</html>

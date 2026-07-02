@@ -1,0 +1,356 @@
+"""
+OKX 매매일지 Flask 서버 — Supabase DB 버전
+환경변수:
+  DATABASE_URL   : Supabase PostgreSQL 연결 문자열
+  OKX_API_KEY    : OKX API Key
+  OKX_SECRET_KEY : OKX Secret Key
+  OKX_PASSPHRASE : OKX Passphrase
+"""
+
+import json, hmac, base64, hashlib, time, datetime, os, threading
+from zoneinfo import ZoneInfo
+from flask import Flask, jsonify, request, send_from_directory
+from flask_cors import CORS
+import urllib.request, urllib.parse
+import psycopg2
+import psycopg2.extras
+from apscheduler.schedulers.background import BackgroundScheduler
+
+app = Flask(__name__, static_folder='.')
+CORS(app)
+KST = ZoneInfo('Asia/Seoul')
+
+# ── DB 연결 ─────────────────────────────────────────────
+def get_db():
+    return psycopg2.connect(os.environ['DATABASE_URL'], sslmode='require')
+
+def init_db():
+    """테이블 없으면 생성"""
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS journal (
+                    id          BIGINT PRIMARY KEY,
+                    date        DATE UNIQUE NOT NULL,
+                    open_bal    NUMERIC,
+                    close_bal   NUMERIC,
+                    pnl         NUMERIC,
+                    pos         TEXT DEFAULT '',
+                    memo        TEXT DEFAULT '',
+                    trades      JSONB DEFAULT '[]',
+                    trade_count INTEGER DEFAULT 0,
+                    created_at  TIMESTAMPTZ DEFAULT NOW(),
+                    updated_at  TIMESTAMPTZ DEFAULT NOW()
+                )
+            """)
+        conn.commit()
+    print('[DB] 테이블 준비 완료')
+
+def db_load_journal():
+    with get_db() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT * FROM journal ORDER BY date ASC")
+            rows = cur.fetchall()
+    result = []
+    for r in rows:
+        result.append({
+            'id':          r['id'],
+            'date':        str(r['date']),
+            'open':        float(r['open_bal'] or 0),
+            'close':       float(r['close_bal'] or 0),
+            'pnl':         float(r['pnl'] or 0),
+            'pos':         r['pos'] or '',
+            'memo':        r['memo'] or '',
+            'trades':      r['trades'] if r['trades'] else [],
+            'trade_count': r['trade_count'] or 0,
+        })
+    return result
+
+def db_upsert(entry):
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO journal (id, date, open_bal, close_bal, pnl, pos, memo, trades, trade_count, updated_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                ON CONFLICT (date) DO UPDATE SET
+                    open_bal    = EXCLUDED.open_bal,
+                    close_bal   = EXCLUDED.close_bal,
+                    pnl         = EXCLUDED.pnl,
+                    pos         = EXCLUDED.pos,
+                    memo        = EXCLUDED.memo,
+                    trades      = EXCLUDED.trades,
+                    trade_count = EXCLUDED.trade_count,
+                    updated_at  = NOW()
+            """, (
+                entry.get('id', int(time.time()*1000)),
+                entry['date'],
+                entry.get('open', 0),
+                entry.get('close', 0),
+                entry.get('pnl', 0),
+                entry.get('pos', ''),
+                entry.get('memo', ''),
+                json.dumps(entry.get('trades', [])),
+                entry.get('trade_count', 0),
+            ))
+        conn.commit()
+
+def db_update(entry_id, fields):
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE journal SET
+                    open_bal   = %s,
+                    close_bal  = %s,
+                    pnl        = %s,
+                    pos        = %s,
+                    memo       = %s,
+                    updated_at = NOW()
+                WHERE id = %s
+            """, (
+                fields.get('open'), fields.get('close'), fields.get('pnl'),
+                fields.get('pos', ''), fields.get('memo', ''), entry_id
+            ))
+        conn.commit()
+        return cur.rowcount > 0
+
+def db_delete(entry_id):
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM journal WHERE id = %s", (entry_id,))
+        conn.commit()
+        return cur.rowcount > 0
+
+# ── OKX API ─────────────────────────────────────────────
+def get_okx_creds():
+    return {
+        'api_key':    os.environ.get('OKX_API_KEY', ''),
+        'secret_key': os.environ.get('OKX_SECRET_KEY', ''),
+        'passphrase': os.environ.get('OKX_PASSPHRASE', ''),
+    }
+
+def get_timestamp():
+    return datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
+
+def sign(ts, method, path, body, secret):
+    msg = ts + method.upper() + path + (body or '')
+    return base64.b64encode(hmac.new(secret.encode(), msg.encode(), hashlib.sha256).digest()).decode()
+
+def okx_request(path, params=None):
+    cfg = get_okx_creds()
+    if not all([cfg['api_key'], cfg['secret_key'], cfg['passphrase']]):
+        return {'code': '-1', 'msg': 'OKX 환경변수가 설정되지 않았습니다.'}
+    base = 'https://www.okx.com'
+    query = ('?' + urllib.parse.urlencode(params)) if params else ''
+    full_path = path + query
+    ts = get_timestamp()
+    sig = sign(ts, 'GET', full_path, '', cfg['secret_key'])
+    headers = {
+        'OK-ACCESS-KEY': cfg['api_key'], 'OK-ACCESS-SIGN': sig,
+        'OK-ACCESS-TIMESTAMP': ts, 'OK-ACCESS-PASSPHRASE': cfg['passphrase'],
+        'Content-Type': 'application/json',
+    }
+    req = urllib.request.Request(base + full_path, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return json.loads(resp.read().decode())
+    except Exception as e:
+        return {'code': '-1', 'msg': str(e)}
+
+# ── 날짜 유틸 ───────────────────────────────────────────
+def date_to_ms_kst(date_str, end=False):
+    d = datetime.datetime.strptime(date_str, '%Y-%m-%d').replace(tzinfo=KST)
+    if end: d = d.replace(hour=23, minute=59, second=59)
+    return int(d.timestamp() * 1000)
+
+def today_kst():
+    return datetime.datetime.now(tz=KST).strftime('%Y-%m-%d')
+
+def yesterday_kst():
+    return (datetime.datetime.now(tz=KST) - datetime.timedelta(days=1)).strftime('%Y-%m-%d')
+
+# ── OKX 데이터 fetch ─────────────────────────────────────
+def fetch_okx_daily(date_str):
+    start_ms = date_to_ms_kst(date_str, end=False)
+    end_ms   = date_to_ms_kst(date_str, end=True)
+    fills = okx_request('/api/v5/trade/fills-history', {
+        'instType': 'SWAP', 'begin': str(start_ms), 'end': str(end_ms), 'limit': '100'
+    })
+    trades, total_pnl, total_fee = [], 0.0, 0.0
+    if fills.get('code') == '0':
+        for f in fills.get('data', []):
+            pnl = float(f.get('pnl', 0))
+            fee = float(f.get('fee', 0))
+            total_pnl += pnl
+            total_fee += fee
+            trades.append({
+                'time':     datetime.datetime.fromtimestamp(int(f['ts'])/1000, tz=KST).strftime('%H:%M:%S'),
+                'inst':     f.get('instId', '').replace('-USDT-SWAP', ''),
+                'side':     f.get('side', ''),
+                'pos_side': f.get('posSide', ''),
+                'sz':       f.get('sz', ''),
+                'price':    f.get('fillPx', ''),
+                'pnl':      pnl,
+                'fee':      fee,
+            })
+    if not trades:
+        return None
+    bal_r = okx_request('/api/v5/account/balance', {'ccy': 'USDT'})
+    current_bal = 0.0
+    if bal_r.get('code') == '0':
+        try:
+            item = next((d for d in bal_r['data'][0]['details'] if d['ccy'] == 'USDT'), None)
+            current_bal = float(item['eq']) if item else 0.0
+        except Exception:
+            pass
+    net = total_pnl + total_fee
+    open_bal  = round(current_bal - net, 2)
+    close_bal = round(current_bal, 2)
+    pnl_pct   = round((net / open_bal * 100) if open_bal else 0, 4)
+    return {
+        'id':          int(time.time()*1000),
+        'date':        date_str,
+        'open':        open_bal,
+        'close':       close_bal,
+        'pnl':         pnl_pct,
+        'trade_count': len(trades),
+        'trades':      trades,
+        'pos':         '',
+        'memo':        f'거래 {len(trades)}회 (OKX 자동)',
+        'pnl_usdt':    round(net, 2),
+        'pnl_pct':     pnl_pct,
+        'open_bal':    open_bal,
+        'close_bal':   close_bal,
+    }
+
+# ── 자동 저장 ────────────────────────────────────────────
+def auto_sync_date(date_str):
+    print(f'[sync] {date_str} 동기화 중...')
+    entry = fetch_okx_daily(date_str)
+    if entry:
+        db_upsert(entry)
+        print(f'[sync] {date_str} 저장 완료 (거래 {entry["trade_count"]}회)')
+        return True
+    print(f'[sync] {date_str} 거래 없음')
+    return False
+
+def backfill(days=7):
+    existing = {d['date'] for d in db_load_journal()}
+    today = today_kst()
+    for i in range(1, days+1):
+        d = (datetime.datetime.now(tz=KST) - datetime.timedelta(days=i)).strftime('%Y-%m-%d')
+        if d not in existing and d != today:
+            auto_sync_date(d)
+            time.sleep(0.5)
+
+def midnight_job():
+    print(f'[scheduler] 자정 자동 저장: {yesterday_kst()}')
+    auto_sync_date(yesterday_kst())
+
+# ── 스케줄러 ─────────────────────────────────────────────
+try:
+    scheduler = BackgroundScheduler(timezone=KST)
+    scheduler.add_job(midnight_job, 'cron', hour=0, minute=1)
+    scheduler.start()
+    threading.Thread(target=lambda: (time.sleep(3), backfill(7)), daemon=True).start()
+except Exception as e:
+    print(f'[scheduler] 시작 실패: {e}')
+
+# ── Flask 라우트 ──────────────────────────────────────────
+@app.route('/')
+def index():
+    return send_from_directory('.', '매매일지.html')
+
+@app.route('/api/status')
+def status():
+    cfg = get_okx_creds()
+    return jsonify({'has_key': bool(cfg['api_key'])})
+
+@app.route('/api/test')
+def test_connection():
+    result = okx_request('/api/v5/account/balance')
+    ok = result.get('code') == '0'
+    return jsonify({'ok': ok, 'msg': '연결 성공!' if ok else result.get('msg','연결 실패')})
+
+@app.route('/api/journal')
+def get_journal():
+    return jsonify({'ok': True, 'data': db_load_journal()})
+
+@app.route('/api/journal/<int:entry_id>', methods=['PUT'])
+def update_journal(entry_id):
+    body = request.json
+    o = float(body.get('open', 0))
+    c = float(body.get('close', 0))
+    pnl = round((c-o)/o*100, 4) if o else 0
+    ok = db_update(entry_id, {'open': o, 'close': c, 'pnl': pnl,
+                               'pos': body.get('pos',''), 'memo': body.get('memo','')})
+    return jsonify({'ok': ok})
+
+@app.route('/api/journal/<int:entry_id>', methods=['DELETE'])
+def delete_journal(entry_id):
+    return jsonify({'ok': db_delete(entry_id)})
+
+@app.route('/api/daily')
+def get_daily():
+    date_str = request.args.get('date', today_kst())
+    entry = fetch_okx_daily(date_str)
+    if entry is None:
+        return jsonify({'ok': True, 'empty': True, 'date': date_str, 'trade_count': 0, 'trades': []})
+    return jsonify({'ok': True, **entry})
+
+@app.route('/api/sync', methods=['POST'])
+def sync_date():
+    date_str = (request.json or {}).get('date', yesterday_kst())
+    ok = auto_sync_date(date_str)
+    data = db_load_journal()
+    entry = next((d for d in data if d['date'] == date_str), None)
+    return jsonify({'ok': ok, 'entry': entry})
+
+@app.route('/api/sync/auto', methods=['POST'])
+def sync_auto():
+    days = (request.json or {}).get('days', 7)
+    threading.Thread(target=backfill, args=(days,), daemon=True).start()
+    return jsonify({'ok': True, 'msg': f'최근 {days}일 백필 시작'})
+
+@app.route('/api/sync/yesterday', methods=['POST'])
+def sync_yesterday():
+    """GitHub Actions에서 호출하는 엔드포인트"""
+    ok = auto_sync_date(yesterday_kst())
+    return jsonify({'ok': ok, 'date': yesterday_kst()})
+
+@app.route('/api/balance')
+def get_balance():
+    result = okx_request('/api/v5/account/balance', {'ccy': 'USDT'})
+    if result.get('code') != '0':
+        return jsonify({'ok': False, 'msg': result.get('msg')}), 400
+    try:
+        item = next((d for d in result['data'][0]['details'] if d['ccy'] == 'USDT'), None)
+        return jsonify({'ok': True, 'balance': round(float(item['eq']), 2) if item else 0})
+    except Exception as e:
+        return jsonify({'ok': False, 'msg': str(e)}), 500
+
+@app.route('/api/positions')
+def get_positions():
+    result = okx_request('/api/v5/account/positions', {'instType': 'SWAP'})
+    if result.get('code') != '0':
+        return jsonify({'ok': False, 'msg': result.get('msg')}), 400
+    positions = []
+    for p in result.get('data', []):
+        if float(p.get('pos', 0)) == 0: continue
+        positions.append({
+            'inst': p.get('instId',''), 'side': p.get('posSide',''),
+            'size': p.get('pos',''), 'avg_px': p.get('avgPx',''),
+            'upl': p.get('upl',''), 'upl_pct': p.get('uplRatio',''), 'lever': p.get('lever',''),
+        })
+    summary = ' / '.join([
+        '{} {} {}개'.format(p['inst'].replace('-USDT-SWAP',''), '롱' if p['side']=='long' else '숏', p['size'])
+        for p in positions
+    ]) if positions else '없음'
+    return jsonify({'ok': True, 'positions': positions, 'summary': summary})
+
+if __name__ == '__main__':
+    init_db()
+    print('='*50)
+    print(' OKX 매매일지 서버 (Supabase + 자동 갱신)')
+    print(' http://localhost:5000')
+    print('='*50)
+    app.run(host='0.0.0.0', port=5000, debug=False)
