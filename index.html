@@ -333,17 +333,27 @@ body{font-family:var(--sans);background:var(--bg);color:var(--text);min-height:1
 </div><!-- /main -->
 </div><!-- /app -->
 
-<!-- API 키 모달 -->
+<!-- API 키 안내 모달 -->
 <div class="modal-bg" id="api-modal">
   <div class="modal">
     <div class="modal-title">OKX API CONFIGURATION</div>
-    <p style="font-family:var(--mono);font-size:10px;color:var(--muted);margin-bottom:16px;line-height:1.6">READ-ONLY PERMISSIONS ONLY. NEVER GRANT WITHDRAW OR TRADE ACCESS.</p>
-    <div class="form-group"><label>API KEY</label><input type="text" id="inp-key" placeholder="Enter API Key"></div>
-    <div class="form-group"><label>SECRET KEY</label><input type="password" id="inp-secret" placeholder="Enter Secret Key"></div>
-    <div class="form-group"><label>PASSPHRASE</label><input type="password" id="inp-pass" placeholder="Enter Passphrase"></div>
+    <p style="font-family:var(--mono);font-size:10px;color:var(--muted2);margin-bottom:16px;line-height:1.8">
+      API 키는 Render 대시보드 환경변수에서 설정해주세요.<br>
+      변경이 필요하면 아래 경로로 이동하세요:
+    </p>
+    <div style="background:var(--bg3);border:1px solid var(--border);padding:14px 16px;font-family:var(--mono);font-size:11px;line-height:2;color:var(--text2)">
+      <div><span style="color:var(--yellow)">1.</span> render.com → 해당 서비스 클릭</div>
+      <div><span style="color:var(--yellow)">2.</span> Environment 탭 클릭</div>
+      <div><span style="color:var(--yellow)">3.</span> 아래 환경변수 수정:</div>
+      <div style="margin-top:8px;color:var(--muted2)">
+        <div>OKX_API_KEY &nbsp;&nbsp;&nbsp;= your api key</div>
+        <div>OKX_SECRET_KEY = your secret key</div>
+        <div>OKX_PASSPHRASE = your passphrase</div>
+      </div>
+      <div style="margin-top:8px"><span style="color:var(--yellow)">4.</span> Save Changes → 자동 재배포</div>
+    </div>
     <div class="modal-actions">
-      <button class="mbtn primary" onclick="saveApiKey()">SAVE & SYNC</button>
-      <button class="mbtn" onclick="closeApiModal()">CANCEL</button>
+      <button class="mbtn" onclick="closeApiModal()">CLOSE</button>
     </div>
   </div>
 </div>
@@ -554,14 +564,7 @@ function closeApiModal(){document.getElementById('api-modal').classList.remove('
 document.getElementById('api-modal').addEventListener('click',function(e){if(e.target===this)closeApiModal();});
 
 function saveApiKey(){
-  var key=document.getElementById('inp-key').value.trim();
-  var secret=document.getElementById('inp-secret').value.trim();
-  var pass=document.getElementById('inp-pass').value.trim();
-  if(!key||!secret||!pass){alert('모든 항목을 입력해주세요.');return;}
-  fetch(SERVER+'/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({api_key:key,secret_key:secret,passphrase:pass})})
-    .then(function(r){return r.json();})
-    .then(function(d){if(d.ok){closeApiModal();setConn('spin','SYNCING...');setTimeout(function(){checkConn();loadJournal(function(){renderAll();renderCalendar();});},3000);}})
-    .catch(function(){alert('서버에 연결할 수 없어요.');});
+  closeApiModal();
 }
 
 /* ── 수정 모달 ── */
