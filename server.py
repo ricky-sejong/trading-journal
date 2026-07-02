@@ -258,7 +258,7 @@ except Exception as e:
 # ── Flask 라우트 ──────────────────────────────────────────
 @app.route('/')
 def index():
-    return send_from_directory('.', '매매일지.html')
+    return send_from_directory('.', 'index.html')
 
 @app.route('/api/status')
 def status():
