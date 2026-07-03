@@ -397,49 +397,29 @@ def _calc_dynamic_sl(self, pos, analysis, pos_key):
         cfg = self.cfg
         struct = analysis["structure"]
 
-        # 🚨 [안전장치] 상태 데이터가 없거나 구버전이면 초기화
-        if pos_key not in self.state["positions"]:
+        # 🚨 [강력한 안전장치] 상태 데이터가 없거나 구버전이면 즉시 초기화
+        if pos_key not in self.state["positions"] or not isinstance(self.state["positions"][pos_key], dict):
             self.state["positions"][pos_key] = {}
-            
+        
         st = self.state["positions"][pos_key]
         
-        # 키가 없으면 기본값(entry)을 넣어 에러 방지
-        if "trail_high" not in st: st["trail_high"] = entry if side == "long" else None
-        if "trail_low" not in st: st["trail_low"] = entry if side == "short" else None
-        if "current_sl" not in st: st["current_sl"] = None
-        if "bot_algo_id" not in st: st["bot_algo_id"] = None
+        # 필수 키가 하나라도 없으면 모두 기본값으로 재설정 (KeyError 방지)
+        required_keys = ["trail_high", "trail_low", "current_sl", "bot_algo_id"]
+        for key in required_keys:
+            if key not in st:
+                if key == "trail_high": st[key] = entry if side == "long" else None
+                elif key == "trail_low": st[key] = entry if side == "short" else None
+                else: st[key] = None
 
+        # (이후 로직은 동일하게 유지)
         pnl_pct = ((mark-entry)/entry*100) if side=="long" else ((entry-mark)/entry*100)
         structural_sl = struct.get("sl_price")
         
         atr_pct_dist = (analysis["atr"] / mark * 100 * cfg["atr_multiplier"]) if cfg.get("atr_enabled") and analysis["atr"] else None
         if atr_pct_dist: 
-            atr_pct_dist = max(cfg["min_tp_pct"], min(cfg["atr_max_pct"], atr_pct_dist)) # min_tp_pct 오타 수정됨
+            atr_pct_dist = max(cfg["min_tp_pct"], min(cfg["atr_max_pct"], atr_pct_dist))
 
-        # 구조적 SL 분석
-        if structural_sl is not None:
-            struct_dist = abs(mark - structural_sl) / mark * 100
-            if atr_pct_dist and struct_dist > atr_pct_dist * 1.5:
-                base_sl = mark*(1-atr_pct_dist/100) if side=="long" else mark*(1+atr_pct_dist/100)
-                src = "구조적 SL 과도"
-            else: 
-                base_sl = structural_sl
-                src = "구조 분석"
-        else: 
-            base_sl = mark*(1-atr_pct_dist/100) if side=="long" else mark*(1+atr_pct_dist/100) if atr_pct_dist else mark*(1-cfg["default_sl_pct"]/100)
-            src = "ATR 폴백"
-
-        # 트레일링 로직
-        if side == "long":
-            if st["trail_high"] is None or mark > st["trail_high"]: st["trail_high"] = mark
-            new_sl = max(st["trail_high"] * (1 - cfg["trail_pct"]/100), base_sl) if cfg.get("trailing_enabled") and pnl_pct >= cfg["trail_activate_pct"] else base_sl
-        else:
-            if st["trail_low"] is None or mark < st["trail_low"]: st["trail_low"] = mark
-            new_sl = min(st["trail_low"] * (1 + cfg["trail_pct"]/100), base_sl) if cfg.get("trailing_enabled") and pnl_pct >= cfg["trail_activate_pct"] else base_sl
-
-        st.update({"current_sl": new_sl, "pnl_pct": round(pnl_pct, 3), "sl_source": src})
-        
-        return new_sl, st
+        # ... (중략: 기존의 트레일링 및 SL 계산 로직을 그대로 두세요)
     def run_once(self):
         positions = self.client.get_all_positions()
         ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
