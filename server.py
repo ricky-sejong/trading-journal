@@ -280,6 +280,12 @@ def fetch_okx_daily(date_str):
 
     total_pnl, total_fee = 0.0, 0.0
 
+    # 디버깅: 원본 체결 데이터 첫 5개 그대로 출력 (필드명 확인용)
+    for i, f in enumerate(fills.get('data', [])[:5]):
+        print(f'[fills-raw-debug] #{i}: pnl={f.get("pnl")!r} fillSz={f.get("fillSz")!r} '
+              f'sz={f.get("sz")!r} side={f.get("side")} posSide={f.get("posSide")} '
+              f'fillPx={f.get("fillPx")!r} subType={f.get("subType")}')
+
     # ordId 기준으로 체결 묶기
     order_map = {}
     for f in fills.get('data', []):
@@ -288,6 +294,8 @@ def fetch_okx_daily(date_str):
         fee = float(f.get('fee', 0) or 0)
         sz  = float(f.get('fillSz', 0) or 0)   # OKX fills-history는 'fillSz' 필드 사용 (sz 아님)
         px  = float(f.get('fillPx', 0) or 0)
+        if pnl != 0:
+            print(f'[fills-pnl-debug] ordId={oid} pnl={pnl} side={f.get("side")} posSide={f.get("posSide")}')
         total_pnl += pnl
         total_fee += fee
         if oid not in order_map:

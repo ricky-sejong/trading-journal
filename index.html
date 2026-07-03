@@ -533,6 +533,22 @@ function sg(v){return v>0?'+':'';}
 function pc(v){return v>0?'pos':v<0?'neg':'z';}
 function clr(v){return v>0?'var(--green)':v<0?'var(--red)':'var(--muted2)';}
 
+/* 시:분:초 문자열 두 개로 보유시간 계산 → "4.5h" 또는 "12m" 형식 */
+function calcDuration(openTime, closeTime){
+  if(!openTime || !closeTime || openTime==='이전날') return '';
+  var o=openTime.split(':').map(Number);
+  var c=closeTime.split(':').map(Number);
+  if(o.length!==3||c.length!==3) return '';
+  var oSec=o[0]*3600+o[1]*60+o[2];
+  var cSec=c[0]*3600+c[1]*60+c[2];
+  var diffSec=cSec-oSec;
+  if(diffSec<0) diffSec+=86400; // 자정 넘어간 경우
+  var hours=diffSec/3600;
+  if(hours>=1) return '('+hours.toFixed(1)+'h)';
+  var mins=Math.round(diffSec/60);
+  return '('+mins+'m)';
+}
+
 function wk(s){var d=new Date(s),j=new Date(d.getFullYear(),0,1);var w=Math.ceil(((d-j)/86400000+j.getDay()+1)/7);return d.getFullYear()+'-W'+String(w).padStart(2,'0');}
 function wkL(s){var d=new Date(s),j=new Date(d.getFullYear(),0,1);var w=Math.ceil(((d-j)/86400000+j.getDay()+1)/7);return d.getFullYear()+'W'+String(w).padStart(2,'0');}
 function mk(s){return s.slice(0,7);}
@@ -655,9 +671,9 @@ function refreshToday(){
             var typColor=p.type==='scalp'?'var(--muted2)':'var(--yellow)';
             var pnlStr=p.pnl!==undefined?(p.pnl>=0?'+':'')+p.pnl.toFixed(2)+' U':'—';
             var openPx=p.open_price?p.open_price.toLocaleString():'이전날';
-            var timeRange=(p.open_time||'—')+' → '+(p.close_time||'—');
+            var timeRange=(p.open_time||'—')+' → '+(p.close_time||'—')+' '+calcDuration(p.open_time,p.close_time);
             return '<div class="trade-row" style="background:rgba(255,255,255,.02);margin:2px 0;border-radius:3px">'+
-              '<span class="t-time" style="min-width:110px">'+timeRange+'</span>'+
+              '<span class="t-time" style="min-width:150px">'+timeRange+'</span>'+
               '<span class="t-side '+sc+'" style="min-width:50px">'+(sc==='long'?'LONG':'SHORT')+'</span>'+
               '<span class="t-inst">'+p.inst+'</span>'+
               '<span style="font-family:var(--mono);font-size:10px;color:var(--muted2)">'+openPx+' → '+p.close_price.toLocaleString()+'</span>'+
@@ -905,9 +921,9 @@ function openDayModal(id){
         var typeLabel=p.type==='scalp'?'SCALP':'SWING←';
         var tc=p.type==='scalp'?'var(--muted2)':'var(--yellow)';
         var openPx=p.open_price?p.open_price.toLocaleString():'이전날';
-        var timeRange=(p.open_time||'—')+'→'+(p.close_time||'—');
+        var timeRange=(p.open_time||'—')+'→'+(p.close_time||'—')+' '+calcDuration(p.open_time,p.close_time);
         return '<div class="trade-row">'+
-          '<span class="t-time" style="min-width:100px">'+timeRange+'</span>'+
+          '<span class="t-time" style="min-width:140px">'+timeRange+'</span>'+
           '<span class="t-side '+sc+'" style="min-width:50px">'+(sc==='long'?'LONG':'SHORT')+'</span>'+
           '<span class="t-inst">'+p.inst+'</span>'+
           '<span style="font-family:var(--mono);font-size:10px;color:var(--muted2)">'+openPx+'→'+p.close_price.toLocaleString()+'</span>'+
