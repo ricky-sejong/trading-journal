@@ -1,5 +1,5 @@
 """
-OKX Position Guardian — 보유 포지션 자동 익절/손절 관리 (로컬 메모리 추적 버전)
+OKX Position Guardian — 보유 포지션 자동 익절/손절 관리 (최종 무결성 버전)
 ================================================================
 """
 
@@ -66,13 +66,12 @@ def load_config():
     return cfg
 
 def load_state():
-    # 상태 파일이 깨져있을 경우 봇이 죽지 않고 초기화하도록 예외 처리 추가
     if STATE_PATH.exists():
         try:
             with open(STATE_PATH, encoding="utf-8") as f:
                 return json.load(f)
         except Exception as e:
-            log.warning(f"상태 파일 읽기 실패 (초기화 진행): {e}")
+            log.warning(f"상태 파일 읽기 실패 (새로 시작합니다): {e}")
     return {"positions": {}}
 
 def save_state(state):
@@ -86,7 +85,7 @@ def save_state(state):
 # ─── OKX REST 클라이언트 ─────────────────────────────────
 class OKXClient:
     BASE = "https://www.okx.com"
-    # 문제의 원인이었던 BOT_TAG(algoClOrdId)는 완전히 삭제했습니다.
+    BOT_TAG = "GUARDIANBOT"
 
     def __init__(self, cfg):
         self.key = cfg["api_key"]
@@ -390,20 +389,20 @@ class PositionGuardian:
             "structure": analyze_chart_structure(opens, highs, lows, closes, side)
         }
 
-def _calc_dynamic_sl(self, pos, analysis, pos_key):
+    def _calc_dynamic_sl(self, pos, analysis, pos_key):
         side = pos.get("posSide", "long")
         entry = float(pos.get("avgPx", 0) or 0)
         mark = float(pos.get("markPx", 0) or analysis["last_price"])
         cfg = self.cfg
         struct = analysis["structure"]
 
-        # 🚨 [강력한 안전장치] 상태 데이터가 없거나 구버전이면 즉시 초기화
+        # 🚨 [완벽한 안전장치] 상태 데이터가 없거나 구버전이면 즉시 초기화
         if pos_key not in self.state["positions"] or not isinstance(self.state["positions"][pos_key], dict):
             self.state["positions"][pos_key] = {}
         
         st = self.state["positions"][pos_key]
         
-        # 필수 키가 하나라도 없으면 모두 기본값으로 재설정 (KeyError 방지)
+        # 필수 키가 하나라도 없으면 모두 기본값으로 재설정하여 에러 방지
         required_keys = ["trail_high", "trail_low", "current_sl", "bot_algo_id"]
         for key in required_keys:
             if key not in st:
@@ -411,7 +410,6 @@ def _calc_dynamic_sl(self, pos, analysis, pos_key):
                 elif key == "trail_low": st[key] = entry if side == "short" else None
                 else: st[key] = None
 
-        # (이후 로직은 동일하게 유지)
         pnl_pct = ((mark-entry)/entry*100) if side=="long" else ((entry-mark)/entry*100)
         structural_sl = struct.get("sl_price")
         
@@ -419,7 +417,49 @@ def _calc_dynamic_sl(self, pos, analysis, pos_key):
         if atr_pct_dist: 
             atr_pct_dist = max(cfg["min_tp_pct"], min(cfg["atr_max_pct"], atr_pct_dist))
 
-        # ... (중략: 기존의 트레일링 및 SL 계산 로직을 그대로 두세요)
+        if structural_sl is not None:
+            struct_dist = abs(mark - structural_sl) / mark * 100
+            if atr_pct_dist and struct_dist > atr_pct_dist * 1.5:
+                base_sl = mark*(1-atr_pct_dist/100) if side=="long" else mark*(1+atr_pct_dist/100)
+                src = "구조적 SL 과도 -> ATR 제한"
+            else: 
+                base_sl = structural_sl
+                src = " / ".join(struct["reasons"][:2]) if struct["reasons"] else "구조 분석"
+        else: 
+            base_sl = mark*(1-atr_pct_dist/100) if side=="long" else mark*(1+atr_pct_dist/100) if atr_pct_dist else mark*(1-cfg["default_sl_pct"]/100)
+            src = "ATR 폴백" if atr_pct_dist else "기본값 폴백"
+
+        if side == "long":
+            if st["trail_high"] is None or mark > st["trail_high"]: st["trail_high"] = mark
+            new_sl = max(st["trail_high"] * (1 - cfg["trail_pct"]/100), base_sl) if cfg.get("trailing_enabled") and pnl_pct >= cfg["trail_activate_pct"] else base_sl
+            if st["current_sl"] is not None: new_sl = max(new_sl, st["current_sl"])
+            if mark - new_sl < mark * (cfg["min_sl_distance_pct"]/100): new_sl = mark - mark * (cfg["min_sl_distance_pct"]/100)
+        else:
+            if st["trail_low"] is None or mark < st["trail_low"]: st["trail_low"] = mark
+            new_sl = min(st["trail_low"] * (1 + cfg["trail_pct"]/100), base_sl) if cfg.get("trailing_enabled") and pnl_pct >= cfg["trail_activate_pct"] else base_sl
+            if st["current_sl"] is not None: new_sl = min(new_sl, st["current_sl"])
+            if new_sl - mark < mark * (cfg["min_sl_distance_pct"]/100): new_sl = mark + mark * (cfg["min_sl_distance_pct"]/100)
+
+        st.update({
+            "current_sl": new_sl, "pnl_pct": round(pnl_pct, 3), "sl_source": src,
+            "pattern": struct.get("pattern"), "sr_levels": struct.get("sr_levels", []),
+            "last_update": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        })
+        
+        raw_tp = struct.get("tp_price")
+        min_tp, min_rr = cfg.get("min_tp_pct", 0.5), cfg.get("min_rr", 1.5)
+        
+        if side == "long":
+            f_tp = max(entry * (1 + min_tp / 100), mark + abs(mark - new_sl) * min_rr)
+            final_tp = raw_tp if raw_tp and raw_tp >= f_tp else f_tp
+        else:
+            f_tp = min(entry * (1 - min_tp / 100), mark - abs(new_sl - mark) * min_rr)
+            final_tp = raw_tp if raw_tp and raw_tp <= f_tp else f_tp
+            
+        st["tp_price"] = final_tp
+        st["actual_rr"] = round(abs(final_tp - mark) / abs(mark - new_sl) if abs(mark - new_sl) > 0 else 0, 2)
+        return new_sl, st
+
     def run_once(self):
         positions = self.client.get_all_positions()
         ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -436,8 +476,8 @@ def _calc_dynamic_sl(self, pos, analysis, pos_key):
             pos_key = f"{inst_id}-{side}"
             symbol = inst_id.replace("-USDT-SWAP", "")
 
-            # 상태 불러오기 (봇 주문 번호 확인용)
-            if pos_key not in self.state["positions"]:
+            # 상태 불러오기 (봇 주문 번호 확인용 - 사전 예외처리)
+            if pos_key not in self.state["positions"] or not isinstance(self.state["positions"][pos_key], dict):
                 self.state["positions"][pos_key] = {}
             st = self.state["positions"][pos_key]
             bot_algo_id = st.get("bot_algo_id")
