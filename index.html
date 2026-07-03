@@ -201,6 +201,78 @@ body{font-family:var(--sans);background:var(--bg);color:var(--text);min-height:1
 .day-stat-label{font-family:var(--mono);font-size:9px;color:var(--muted);letter-spacing:.1em;margin-bottom:4px}
 .day-stat-val{font-family:var(--mono);font-size:18px;font-weight:500}
 .trade-section-title{font-family:var(--mono);font-size:9px;color:var(--muted);letter-spacing:.12em;margin-bottom:8px}
+
+/* ── 모바일 반응형 ── */
+@media (max-width: 768px) {
+  /* 티커 바 */
+  .ticker-bar{height:30px}
+  .ticker-item{font-size:10px;padding:0 16px}
+
+  /* 앱 레이아웃: 사이드바 숨기고 하단 탭바 */
+  .app{flex-direction:column;height:auto;min-height:calc(100vh - 30px)}
+  .sidebar{display:none}
+  .main{flex:1;overflow-y:auto;padding-bottom:60px}
+  .panel{padding:14px}
+
+  /* 하단 탭바 */
+  .mobile-tabbar{display:flex;position:fixed;bottom:0;left:0;right:0;height:56px;background:var(--bg2);border-top:1px solid var(--border);z-index:50}
+  .mobile-tab{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;cursor:pointer;color:var(--muted);border:none;background:transparent;font-family:var(--mono);font-size:9px;letter-spacing:.05em;padding:6px 0}
+  .mobile-tab.active{color:var(--yellow)}
+  .mobile-tab-icon{font-size:18px;line-height:1}
+
+  /* AT 배너: 2열 그리드 */
+  .at-banner{grid-template-columns:1fr 1fr;gap:1px}
+  .at-val{font-size:15px}
+  .at-sub{font-size:10px}
+
+  /* 지표 행 */
+  .metrics{grid-template-columns:1fr 1fr}
+
+  /* 차트 높이 */
+  .chart-wrap{height:160px}
+
+  /* 패널 헤더 */
+  .panel-header{margin-bottom:14px;padding-bottom:10px}
+  .panel-title{font-size:12px}
+
+  /* 달력 */
+  .cal-cell{min-height:44px;padding:3px 4px}
+  .cal-pnl{font-size:10px}
+  .cal-pct{font-size:9px}
+  .cal-dow{font-size:9px;padding:3px 0}
+  .cal-day{font-size:10px}
+  .cal-nav span{font-size:13px;min-width:100px}
+
+  /* 테이블 스크롤 */
+  .table-wrap{overflow-x:auto}
+  .data-table{font-size:11px}
+  .data-table th,.data-table td{padding:6px 8px}
+
+  /* live trades 그리드 */
+  .live-grid{grid-template-columns:1fr 1fr}
+  .live-val{font-size:13px}
+
+  /* 포지션 테이블 */
+  .pos-table{font-size:10px}
+  .pos-table th,.pos-table td{padding:6px 8px}
+
+  /* Guardian 바 */
+  .guardian-bar{flex-wrap:wrap;gap:8px}
+
+  /* 모달 */
+  .modal{margin:.5rem;padding:16px}
+  .form-row{grid-template-columns:1fr}
+
+  /* 사이드바 하단 버튼들을 모바일 상단으로 */
+  .mobile-conn-bar{display:flex;align-items:center;gap:8px;padding:8px 14px;background:var(--bg2);border-bottom:1px solid var(--border);flex-wrap:wrap}
+  .mobile-conn-bar .conn-dot{width:6px;height:6px;border-radius:50%;flex-shrink:0}
+  .mobile-conn-bar .conn-text{font-family:var(--mono);font-size:10px;color:var(--muted2);flex:1}
+}
+
+@media (min-width: 769px) {
+  .mobile-tabbar{display:none}
+  .mobile-conn-bar{display:none}
+}
 </style>
 </head>
 <body>
@@ -225,7 +297,15 @@ body{font-family:var(--sans);background:var(--bg);color:var(--text);min-height:1
 </div>
 
 <div class="app">
-<!-- 사이드바 -->
+<!-- 모바일 연결 상태 바 (사이드바 대신) -->
+<div class="mobile-conn-bar">
+  <div class="conn-dot" id="conn-dot-m"></div>
+  <span class="conn-text" id="conn-status-m">CONNECTING...</span>
+  <button class="sm-btn" onclick="testConn()" style="font-size:9px;padding:3px 8px">TEST</button>
+  <button class="sm-btn" onclick="triggerBackfill()" style="font-size:9px;padding:3px 8px">SYNC</button>
+</div>
+
+<!-- 사이드바 (데스크탑만 표시) -->
 <div class="sidebar">
   <div class="sidebar-logo">
     <div class="logo-main">TRADING JOURNAL</div>
@@ -349,6 +429,26 @@ body{font-family:var(--sans);background:var(--bg);color:var(--text);min-height:1
 
 </div><!-- /main -->
 </div><!-- /app -->
+
+<!-- 모바일 하단 탭바 -->
+<nav class="mobile-tabbar">
+  <button class="mobile-tab active" id="mtab-dashboard" onclick="switchPanel('dashboard')">
+    <span class="mobile-tab-icon">📊</span>
+    <span>DASH</span>
+  </button>
+  <button class="mobile-tab" id="mtab-calendar" onclick="switchPanel('calendar')">
+    <span class="mobile-tab-icon">📅</span>
+    <span>CALENDAR</span>
+  </button>
+  <button class="mobile-tab" id="mtab-history" onclick="switchPanel('history')">
+    <span class="mobile-tab-icon">📋</span>
+    <span>RECORDS</span>
+  </button>
+  <button class="mobile-tab" id="mtab-trades" onclick="switchPanel('trades')">
+    <span class="mobile-tab-icon">⚡</span>
+    <span>LIVE</span>
+  </button>
+</nav>
 
 <!-- START BALANCE 설정 모달 -->
 <div class="modal-bg" id="startbal-modal">
@@ -501,9 +601,15 @@ function updateTicker(){
 
 /* ── 연결 상태 ── */
 function setConn(state,msg){
+  var cls='conn-dot '+(state==='on'?'on':state==='spin'?'spin':'off');
   var dot=document.getElementById('conn-dot');
-  dot.className='conn-dot '+(state==='on'?'on':state==='spin'?'spin':'off');
-  document.getElementById('conn-status').textContent=msg;
+  if(dot){dot.className=cls;}
+  var dotM=document.getElementById('conn-dot-m');
+  if(dotM){dotM.className=cls;}
+  var el=document.getElementById('conn-status');
+  if(el)el.textContent=msg;
+  var elM=document.getElementById('conn-status-m');
+  if(elM)elM.textContent=msg;
 }
 
 function checkConn(){
@@ -1057,9 +1163,18 @@ function renderAll(){renderBanner(journalData);renderMetrics(journalData);render
 
 function switchPanel(panel){
   var panels=['dashboard','calendar','history','trades'];
+  // 사이드바 (데스크탑)
   document.querySelectorAll('.nav-item').forEach(function(el,i){el.classList.toggle('active',panels[i]===panel);});
+  // 모바일 하단 탭바
+  panels.forEach(function(p){
+    var btn=document.getElementById('mtab-'+p);
+    if(btn)btn.classList.toggle('active',p===panel);
+  });
   document.querySelectorAll('.panel').forEach(function(el){el.classList.remove('active');});
   document.getElementById('p-'+panel).classList.add('active');
+  // 모바일에서 패널 전환 시 맨 위로 스크롤
+  var mainEl=document.querySelector('.main');
+  if(mainEl)mainEl.scrollTop=0;
   if(panel==='dashboard')loadJournal(function(){renderAll();});
   if(panel==='calendar')loadJournal(function(){renderCalendar();});
   if(panel==='history')loadJournal(function(){renderHistory();});
