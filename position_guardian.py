@@ -56,7 +56,7 @@ DEFAULT_CONFIG = {
 
     # 트레일링 스탑
     "trailing_enabled":   True,
-    "trail_pct":          1.0,
+    "trail_pct":          1.5,
     "trail_activate_pct": 0.5,
 
     # ATR
@@ -75,8 +75,11 @@ DEFAULT_CONFIG = {
     "default_tp_pct": 3.0,
 
     # 안전장치
+    # 레버리지 기반 SL/TP 거리 조정
+    "leverage_ref": 10,   # 기준 레버리지 — 이보다 높으면 SL/TP 타이트, 낮으면 넓게
+
     "max_loss_pct_of_margin": 80,
-    "min_sl_distance_pct":    0.2,
+    "min_sl_distance_pct":    0.5,
 
     # SL/TP 기존 주문 유지 여부
     "skip_if_has_sl": True,
@@ -865,6 +868,26 @@ class PositionGuardian:
             "structure": structure, "htf": htf,
         }
 
+    def _get_leverage_factor(self, pos):
+        """
+        레버리지 기반 SL/TP 거리 배율 계산.
+        기준 레버리지(10x) 대비 실제 레버리지로 조정.
+        레버리지가 높을수록 같은 가격변동에도 마진손실률이 커지므로 SL을 더 타이트하게,
+        레버리지가 낮을수록 SL을 더 넓게 잡는다.
+        반환: (factor, leverage)
+        """
+        ref_leverage = self.cfg.get("leverage_ref", 10)
+        try:
+            leverage = float(pos.get("lever", ref_leverage) or ref_leverage)
+        except (ValueError, TypeError):
+            leverage = ref_leverage
+        if leverage <= 0:
+            leverage = ref_leverage
+        factor = ref_leverage / leverage
+        # 배율 범위 제한 (너무 극단적으로 좁아지거나 넓어지지 않도록)
+        factor = max(0.4, min(2.5, factor))
+        return factor, leverage
+
     def _calc_dynamic_sl(self, pos, analysis, pos_key):
         # OKX 필드명 매핑 (빈 문자열 방어)
         side  = pos.get("posSide", "long")
@@ -877,6 +900,9 @@ class PositionGuardian:
         cfg   = self.cfg
         struct = analysis["structure"]
 
+        # 레버리지 기반 거리 배율
+        lev_factor, leverage = self._get_leverage_factor(pos)
+
         st = self.state["positions"].setdefault(pos_key, {
             "trail_high": entry if side == "long" else None,
             "trail_low":  entry if side == "short" else None,
@@ -888,11 +914,13 @@ class PositionGuardian:
         # ── 1) 구조 기반 SL ──
         structural_sl = struct.get("sl_price")
 
-        # ── 2) ATR 폴백 ──
+        # ── 2) ATR 폴백 (레버리지 배율 적용) ──
         atr_pct_dist = None
         if cfg.get("atr_enabled") and analysis["atr"]:
             atr_pct = analysis["atr"] / mark * 100
-            atr_pct_dist = max(cfg["atr_min_pct"], min(cfg["atr_max_pct"], atr_pct * cfg["atr_multiplier"]))
+            atr_min = cfg["atr_min_pct"] * lev_factor
+            atr_max = cfg["atr_max_pct"] * lev_factor
+            atr_pct_dist = max(atr_min, min(atr_max, atr_pct * cfg["atr_multiplier"]))
 
         if structural_sl is not None:
             struct_dist_pct = abs(mark - structural_sl) / mark * 100
@@ -909,9 +937,9 @@ class PositionGuardian:
             base_sl = mark*(1-sl_dist_pct/100) if side=="long" else mark*(1+sl_dist_pct/100)
             struct_source = "구조 미감지 — ATR 폴백"
         else:
-            sl_dist_pct = cfg["default_sl_pct"]
+            sl_dist_pct = cfg["default_sl_pct"] * lev_factor
             base_sl = mark*(1-sl_dist_pct/100) if side=="long" else mark*(1+sl_dist_pct/100)
-            struct_source = "기본값 폴백"
+            struct_source = f"기본값 폴백 (레버리지 {leverage:.0f}x 반영)"
 
         # ── 2.5) 멀티타임프레임 bias 반영 ──
         # 상위 추세가 포지션과 같은 방향이면 SL 여유롭게 (추세 지속 기대)
@@ -944,26 +972,26 @@ class PositionGuardian:
             if st["trail_high"] is None or mark > st["trail_high"]:
                 st["trail_high"] = mark
             if trailing_active:
-                trail_sl = st["trail_high"] * (1 - cfg["trail_pct"]/100)
+                trail_sl = st["trail_high"] * (1 - (cfg["trail_pct"]*lev_factor)/100)
                 new_sl = max(trail_sl, base_sl) if base_sl else trail_sl
             else:
                 new_sl = base_sl
             if st["current_sl"] is not None:
                 new_sl = max(new_sl, st["current_sl"])  # 래칫
-            min_gap = mark * (cfg["min_sl_distance_pct"]/100)
+            min_gap = mark * ((cfg["min_sl_distance_pct"]*lev_factor)/100)
             if mark - new_sl < min_gap:
                 new_sl = mark - min_gap
         else:
             if st["trail_low"] is None or mark < st["trail_low"]:
                 st["trail_low"] = mark
             if trailing_active:
-                trail_sl = st["trail_low"] * (1 + cfg["trail_pct"]/100)
+                trail_sl = st["trail_low"] * (1 + (cfg["trail_pct"]*lev_factor)/100)
                 new_sl = min(trail_sl, base_sl) if base_sl else trail_sl
             else:
                 new_sl = base_sl
             if st["current_sl"] is not None:
                 new_sl = min(new_sl, st["current_sl"])
-            min_gap = mark * (cfg["min_sl_distance_pct"]/100)
+            min_gap = mark * ((cfg["min_sl_distance_pct"]*lev_factor)/100)
             if new_sl - mark < min_gap:
                 new_sl = mark + min_gap
 
@@ -980,7 +1008,7 @@ class PositionGuardian:
 
         # ── 4) TP 보정 — 최소 TP % + 최소 RR 보장 ──
         raw_tp = struct.get("tp_price")
-        min_tp_pct = cfg.get("min_tp_pct", 0.5)
+        min_tp_pct = cfg.get("min_tp_pct", 0.5) * lev_factor
         min_rr     = cfg.get("min_rr", 1.5)
 
         if side == "long":
