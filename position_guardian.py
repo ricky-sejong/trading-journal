@@ -200,18 +200,25 @@ class OKXClient:
     def get_existing_tpsl(self, inst_id, pos_side):
         """
         해당 포지션에 이미 설정된 TP/SL 알고 주문 조회.
+        conditional 외 다양한 ordType을 순회 조회 (posSide 필터는 완화 — 값이 없거나
+        다르게 오는 경우가 있어 못 찾는 문제를 방지).
         반환: {'has_sl': bool, 'has_tp': bool, 'sl_price': float|None, 'tp_price': float|None, 'algo_id': str|None}
         """
-        d = self._req("GET", "/api/v5/trade/orders-algo-pending", {
-            "instType": "SWAP",
-            "instId":   inst_id,
-            "ordType":  "conditional",
-        })
         has_sl = False; has_tp = False
         sl_price = None; tp_price = None; algo_id = None
-        if d.get("code") == "0":
+
+        for ord_type in ("conditional", "oco", "trigger", "move_order_stop"):
+            d = self._req("GET", "/api/v5/trade/orders-algo-pending", {
+                "instType": "SWAP",
+                "instId":   inst_id,
+                "ordType":  ord_type,
+            })
+            if d.get("code") != "0":
+                continue
             for o in d.get("data", []):
-                if o.get("posSide") != pos_side:
+                # posSide가 일치하거나, 비어있거나(net 모드 등) 아예 없는 경우도 허용
+                o_pos_side = o.get("posSide", "")
+                if o_pos_side and o_pos_side != pos_side:
                     continue
                 sl = o.get("slTriggerPx", "")
                 tp = o.get("tpTriggerPx", "")
@@ -223,9 +230,11 @@ class OKXClient:
                     tp_price = float(tp)
                 if sl or tp:
                     algo_id = o.get("algoId")
+            if algo_id:
+                break  # 찾았으면 더 조회할 필요 없음
+
         return {"has_sl": has_sl, "has_tp": has_tp,
                 "sl_price": sl_price, "tp_price": tp_price, "algo_id": algo_id}
-
     def get_all_algo_ids(self, inst_id):
         """
         해당 심볼의 모든 pending algo 주문 ID 목록 조회.
@@ -265,7 +274,9 @@ class OKXClient:
             body["newTpOrdPx"]         = "-1"
             body["newTpTriggerPxType"] = "mark"
         log.info(f"AMEND 요청: algoId={algo_id} SL={sl_price} TP={tp_price}")
-        return self._req("POST", "/api/v5/trade/amend-algos", body=body)
+        res = self._req("POST", "/api/v5/trade/amend-algos", body=body)
+        log.info(f"AMEND 응답: {json.dumps(res, ensure_ascii=False)}")
+        return res
 
     def cancel_algo(self, inst_id, algo_id):
         """알고 주문 취소"""
