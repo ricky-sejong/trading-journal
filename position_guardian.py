@@ -376,8 +376,9 @@ def analyze_chart_structure(opens, highs, lows, closes, side):
 
 
 # ─── 가디언 전역 상태 (서버에서 제어) ──────────────────────
-guardian_running = True   # True = 활성, False = 일시정지
-guardian_instance = None  # 서버에서 참조용
+guardian_running    = True    # True = 활성, False = 일시정지
+guardian_instance   = None    # 서버에서 참조용
+guardian_pos_config = {}      # 포지션별 ON/OFF {"BTC-USDT-SWAP-long": True/False}
 
 # ─── 포지션 가디언 ──────────────────────────────────────
 class PositionGuardian:
@@ -592,6 +593,33 @@ class PositionGuardian:
             pos_key  = f"{inst_id}-{side}"
             symbol   = inst_id.replace("-USDT-SWAP", "")
 
+            # ── 포지션별 ON/OFF 체크 ──
+            # 기본값은 True (설정 없으면 활성)
+            pos_enabled = guardian_pos_config.get(pos_key, True)
+            if not pos_enabled:
+                log.info(f"  ⏸️  {symbol} {side.upper()}: Guardian OFF (사용자 설정) — 건너뜀")
+                # 스냅샷엔 포함 (모니터링은 유지)
+                try:
+                    mark = float(pos.get("markPx", 0) or 0)
+                    entry = float(pos.get("avgPx", 0) or 0)
+                    upl = float(pos.get("upl", 0) or 0)
+                except Exception:
+                    mark = entry = upl = 0
+                snapshot.append({
+                    "symbol": symbol, "inst_id": inst_id, "side": side,
+                    "entry": entry, "mark": mark,
+                    "pnl_pct": round(((mark-entry)/entry*100) if entry else 0, 2),
+                    "sl": None, "sl_dist_pct": 0,
+                    "trailing_active": False,
+                    "sl_source": "Guardian OFF",
+                    "tp_price": None, "tp_source": "Guardian OFF",
+                    "pattern": None, "sr_levels": [],
+                    "leverage": pos.get("lever", "?"),
+                    "unrealized_pl": upl,
+                    "guardian_enabled": False,
+                })
+                continue
+
             analysis = self._analyze_symbol(inst_id, side)
             if analysis is None:
                 log.warning(f"  {inst_id}: 캔들 데이터 부족 — 건너뜀")
@@ -686,10 +714,13 @@ class PositionGuardian:
                 "trailing_active": st["trailing_active"],
                 "sl_source":       st.get("sl_source", "-"),
                 "tp_price":        st.get("tp_price"),
+                "tp_source":       st.get("tp_source", "-"),
+                "actual_rr":       st.get("actual_rr", 0),
                 "pattern":         st.get("pattern"),
                 "sr_levels":       st.get("sr_levels", []),
                 "leverage":        lever,
                 "unrealized_pl":   pos.get("upl"),
+                "guardian_enabled": True,
             })
 
         self.state["latest"] = {
