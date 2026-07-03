@@ -221,73 +221,131 @@ def fetch_day_balances(date_str):
     # bills는 최신순 → 오름차순 정렬
     bills_sorted = sorted(bills, key=lambda b: int(b.get('ts', 0)))
 
-    # 첫 번째 bill 로그 (디버깅용)
+    # 디버깅 로그
     if bills_sorted:
         b0 = bills_sorted[0]
         bl = bills_sorted[-1]
         print(f'[bills-debug] 첫 bill: bal={b0.get("bal")} balChg={b0.get("balChg")} pnl={b0.get("pnl")} type={b0.get("type")}')
         print(f'[bills-debug] 끝 bill: bal={bl.get("bal")} balChg={bl.get("balChg")} pnl={bl.get("pnl")} type={bl.get("type")}')
 
-    # 첫 번째 bill 직전 잔고 = 시작잔고
-    # bal 필드: 해당 bill 처리 후 잔고
-    # 시작잔고 = 첫 bill의 bal - 첫 bill의 pnl 변화량
+    # 입금(1)/출금(2) 제외 — 거래 관련 bills만 사용
+    # type: 1=입금 2=출금 6=자금비용 8=실현손익 14=수수료 등
+    EXCLUDE_TYPES = {'1', '2'}
+    trading_bills = [b for b in bills_sorted if b.get('type','') not in EXCLUDE_TYPES]
+
+    if not trading_bills:
+        print(f'[bills] 거래 관련 bill 없음 (전체 {len(bills)}건 중 입출금만 존재)')
+        return None, None
+
     try:
-        first_bal_after = float(bills_sorted[0].get('bal', 0))
-        first_pnl_chg   = float(bills_sorted[0].get('balChg', 0))
-        open_bal  = round(first_bal_after - first_pnl_chg, 2)
-        close_bal = round(float(bills_sorted[-1].get('bal', 0)), 2)
+        first = trading_bills[0]
+        last  = trading_bills[-1]
+        # 시작잔고 = 첫 거래 bill 처리 후 잔고 - 변화량
+        open_bal  = round(float(first.get('bal', 0)) - float(first.get('balChg', 0)), 2)
+        close_bal = round(float(last.get('bal', 0)), 2)
     except Exception as e:
         print(f'[bills] parse error: {e}')
         return None, None
 
-    print(f'[bills] {date_str} {len(bills)}건 | 시작:{open_bal} → 마감:{close_bal}')
+    print(f'[bills] {date_str} 거래 {len(trading_bills)}건 | 시작:{open_bal} → 마감:{close_bal}')
     return open_bal, close_bal
 
 def fetch_okx_daily(date_str):
     start_ms = date_to_ms_kst(date_str, end=False)
     end_ms   = date_to_ms_kst(date_str, end=True)
 
-    # 1) 체결 내역
     fills = okx_request('/api/v5/trade/fills-history', {
         'instType': 'SWAP', 'begin': str(start_ms), 'end': str(end_ms), 'limit': '100'
     })
     print(f'[fills] {date_str} code={fills.get("code")} count={len(fills.get("data",[]))}')
 
-    trades, total_pnl, total_fee = [], 0.0, 0.0
-    if fills.get('code') == '0':
-        for f in fills.get('data', []):
-            pnl = float(f.get('pnl', 0) or 0)
-            fee = float(f.get('fee', 0) or 0)
-            total_pnl += pnl
-            total_fee += fee
-            trades.append({
+    if fills.get('code') != '0' or not fills.get('data'):
+        return None
+
+    total_pnl, total_fee = 0.0, 0.0
+
+    # ordId 기준으로 체결 묶기
+    order_map = {}
+    for f in fills.get('data', []):
+        oid = f.get('ordId') or f.get('tradeId', str(time.time()))
+        pnl = float(f.get('pnl', 0) or 0)
+        fee = float(f.get('fee', 0) or 0)
+        sz  = float(f.get('sz', 0) or 0)
+        px  = float(f.get('fillPx', 0) or 0)
+        total_pnl += pnl
+        total_fee += fee
+        if oid not in order_map:
+            order_map[oid] = {
                 'time':     datetime.datetime.fromtimestamp(int(f['ts'])/1000, tz=KST).strftime('%H:%M:%S'),
                 'inst':     f.get('instId','').replace('-USDT-SWAP',''),
                 'side':     f.get('side',''),
                 'pos_side': f.get('posSide',''),
-                'sz':       f.get('sz',''),
-                'price':    f.get('fillPx',''),
-                'pnl':      pnl,
-                'fee':      fee,
+                'sz': sz, 'price': px, 'pnl': pnl, 'fee': fee, 'fills_count': 1, 'ord_id': oid,
+            }
+        else:
+            o = order_map[oid]
+            total_sz = o['sz'] + sz
+            if total_sz > 0:
+                o['price'] = (o['price'] * o['sz'] + px * sz) / total_sz
+            o['sz'] += sz; o['pnl'] += pnl; o['fee'] += fee; o['fills_count'] += 1
+
+    orders = sorted(order_map.values(), key=lambda x: x['time'])
+    trade_count = len(orders)
+
+    # 진입/청산 페어 매칭
+    open_orders = {}
+    closed_pairs = []
+    swing_positions = []
+
+    for o in orders:
+        key = o['inst'] + '-' + o['pos_side']
+        is_open = (o['pos_side'] == 'long' and o['side'] == 'buy') or                   (o['pos_side'] == 'short' and o['side'] == 'sell')
+        if is_open:
+            open_orders.setdefault(key, []).append(o)
+        else:
+            if open_orders.get(key):
+                op = open_orders[key].pop(0)
+                closed_pairs.append({
+                    'inst': o['inst'], 'pos_side': o['pos_side'],
+                    'open_time': op['time'], 'close_time': o['time'],
+                    'open_price': round(op['price'], 4), 'close_price': round(o['price'], 4),
+                    'sz': round(o['sz'], 6),
+                    'pnl': round(op['pnl'] + o['pnl'], 4), 'fee': round(op['fee'] + o['fee'], 4),
+                    'type': 'scalp',
+                })
+            else:
+                closed_pairs.append({
+                    'inst': o['inst'], 'pos_side': o['pos_side'],
+                    'open_time': '이전날', 'close_time': o['time'],
+                    'open_price': None, 'close_price': round(o['price'], 4),
+                    'sz': round(o['sz'], 6),
+                    'pnl': round(o['pnl'], 4), 'fee': round(o['fee'], 4),
+                    'type': 'swing_close',
+                })
+
+    for key, ops in open_orders.items():
+        for op in ops:
+            swing_positions.append({
+                'inst': op['inst'], 'pos_side': op['pos_side'],
+                'open_time': op['time'], 'open_price': round(op['price'], 4),
+                'sz': round(op['sz'], 6), 'type': 'swing_open',
             })
 
-    if not trades:
-        return None
+    trades = [{
+        'time': o['time'], 'inst': o['inst'], 'side': o['side'], 'pos_side': o['pos_side'],
+        'sz': str(round(o['sz'], 6)), 'price': str(round(o['price'], 4)),
+        'pnl': round(o['pnl'], 4), 'fee': round(o['fee'], 4), 'fills': o['fills_count'],
+    } for o in orders]
 
-    # 2) bills 기반 정확한 시작/마감 잔고
     open_bal, close_bal = fetch_day_balances(date_str)
-
-    # bills 실패 시 역산 폴백
     if open_bal is None:
-        print(f'[bills] 폴백 — 현재잔고 역산 방식 사용')
         bal_r = okx_request('/api/v5/account/balance', {'ccy': 'USDT'})
         current_bal = 0.0
         if bal_r.get('code') == '0':
             try:
                 item = next((d for d in bal_r['data'][0]['details'] if d['ccy'] == 'USDT'), None)
                 current_bal = float(item['eq']) if item else 0.0
-            except Exception:
-                pass
+            except Exception: pass
         net = total_pnl + total_fee
         open_bal  = round(current_bal - net, 2)
         close_bal = round(current_bal, 2)
@@ -295,16 +353,23 @@ def fetch_okx_daily(date_str):
         net = round(close_bal - open_bal, 2)
 
     pnl_pct = round((net / open_bal * 100) if open_bal else 0, 4)
+    swing_summary = ', '.join([f"{p['inst']} {p['pos_side'].upper()}" for p in swing_positions])
+    n_scalp = len([p for p in closed_pairs if p['type']=='scalp'])
+    n_swing_c = len([p for p in closed_pairs if p['type']=='swing_close'])
+    n_swing_o = len(swing_positions)
 
     return {
         'id': int(time.time()*1000), 'date': date_str,
         'open': open_bal, 'close': close_bal, 'pnl': pnl_pct,
-        'trade_count': len(trades), 'trades': trades,
-        'pos': '', 'memo': f'거래 {len(trades)}회 (OKX 자동)',
+        'trade_count': trade_count,
+        'trades': trades,
+        'closed_pairs': closed_pairs,
+        'swing_positions': swing_positions,
+        'pos': swing_summary,
+        'memo': f'주문 {trade_count}회 (단타:{n_scalp} 스윙청산:{n_swing_c} 스윙보유:{n_swing_o})',
         'pnl_usdt': round(net, 2), 'pnl_pct': pnl_pct,
         'open_bal': open_bal, 'close_bal': close_bal,
     }
-
 # ── 자동 저장 ────────────────────────────────────────────
 def auto_sync_date(date_str):
     print(f'[sync] {date_str} 동기화 중...')
@@ -412,11 +477,23 @@ def get_journal():
         data = db_load_journal()
         start_bal  = db_get_setting('start_balance')
         start_date = db_get_setting('start_balance_date')
+
+        # 현재 잔고는 OKX에서 직접 가져옴
+        current_bal = None
+        bal_r = okx_request('/api/v5/account/balance', {'ccy': 'USDT'})
+        if bal_r.get('code') == '0':
+            try:
+                item = next((d for d in bal_r['data'][0]['details'] if d['ccy'] == 'USDT'), None)
+                current_bal = round(float(item['eq']), 2) if item else None
+            except Exception:
+                pass
+
         return jsonify({
             'ok': True,
             'data': data,
             'start_balance': float(start_bal) if start_bal else None,
             'start_balance_date': start_date,
+            'current_balance': current_bal,
         })
     except Exception as e:
         print(f'[journal] error: {e}')
