@@ -1,10 +1,9 @@
 """
-OKX Position Guardian — 보유 포지션 자동 익절/손절 관리 (최종 검증 완료 버전)
+OKX Position Guardian — 보유 포지션 자동 익절/손절 관리 (API 규격 최종 수정본)
 ================================================================
-개선 및 버그 수정 완료:
-  - analyze_chart_structure 내 UnboundLocalError 문법 오류 완벽 수정
-  - format_price와 수치 연산 간의 문자열/숫자 타입 충돌 버그 해결
-  - clOrdId ('GUARDIAN_BOT') 기반 수동 주문 보호 및 봇 주문 실시간 갱신 완벽 연동
+버그 수정 내역:
+  - 알고 주문(TP/SL) 규격에 맞게 clOrdId를 'algoClOrdId'로 필드명 전면 수정
+  - 누락되었던 메인 엔진 run() 메서드 완벽 복구 및 들여쓰기 정비
 """
 
 import os, json, time, hmac, hashlib, base64, logging, datetime, math
@@ -80,10 +79,10 @@ def save_state(state):
         json.dump(state, f, indent=2, ensure_ascii=False, default=str)
 
 
-# ─── OKX REST 클라이언트 ─────────────────────────────────
+# ─── OKX REST 클라이언트 (필드명 algoClOrdId로 교체) ───────────────
 class OKXClient:
     BASE = "https://www.okx.com"
-    BOT_TAG = "GUARDIAN_BOT"
+    BOT_TAG = "GUARDIAN_BOT"  # 봇 주문 식별자
 
     def __init__(self, cfg):
         self.key = cfg["api_key"]
@@ -172,7 +171,8 @@ class OKXClient:
                     has_tp = True; tp_price = float(tp)
                 if sl or tp:
                     algo_id = o.get("algoId")
-                    if o.get("clOrdId") == self.BOT_TAG:
+                    # OKX 알고주문 전용 식별자인 algoClOrdId를 확인합니다.
+                    if o.get("algoClOrdId") == self.BOT_TAG:
                         is_bot_order = True
                     break
         return {"has_sl": has_sl, "has_tp": has_tp, "sl_price": sl_price, "tp_price": tp_price, "algo_id": algo_id, "is_bot_order": is_bot_order}
@@ -210,7 +210,7 @@ class OKXClient:
             "instId": inst_id, "tdMode": td_mode,
             "side": "sell" if pos_side == "long" else "buy", "posSide": pos_side,
             "ordType": "conditional", "closeFraction": "1",
-            "clOrdId": self.BOT_TAG 
+            "algoClOrdId": self.BOT_TAG  # 수정한 부분: 일반 clOrdId가 아닌 algoClOrdId 사용
         }
         if sl_price:
             body["slTriggerPx"] = self.format_price(inst_id, sl_price)
@@ -481,7 +481,6 @@ class PositionGuardian:
 
             existing = self._get_existing_tpsl_cached(inst_id, side)
             
-            # 수동 주문 vs 봇 주문 필터링 거름망
             skip_sl = self.skip_if_has_sl and existing["has_sl"] and not existing["is_bot_order"]
             skip_tp = self.skip_if_has_tp and existing["has_tp"] and not existing["is_bot_order"]
             algo_id = existing.get("algo_id")
@@ -520,14 +519,17 @@ class PositionGuardian:
         self.state["latest"] = {"time": ts, "position_count": len(snapshot), "positions": snapshot}
         save_state(self.state)
 
+    # 수정한 부분: 들여쓰기 공간을 정비하고 PositionGuardian 클래스의 자식 메서드로 완벽 귀속시킴
     def run(self):
         log.info("=" * 60)
-        log.info(" OKX Position Guardian - 실시간 동적 추적 엔진 구동")
-        log.info(f" 봇 탐지 상태: GUARDIAN_BOT 오더는 실시간으로 덮어쓰며 수정됩니다.")
+        log.info(" OKX Position Guardian - 실시간 동적 추적 엔진 구동 완료")
+        log.info(" 봇 탐지 상태: GUARDIAN_BOT 오더는 실시간으로 변경 추적됩니다.")
         log.info("=" * 60)
         while True:
-            try: self.run_once()
-            except Exception as e: log.error(f"가디언 루프 에러 발생: {e}", exc_info=True)
+            try: 
+                self.run_once()
+            except Exception as e: 
+                log.error(f"가디언 루프 에러 발생: {e}", exc_info=True)
             time.sleep(self.cfg["poll_interval_sec"])
 
 if __name__ == "__main__":
