@@ -286,7 +286,7 @@ def fetch_okx_daily(date_str):
         oid = f.get('ordId') or f.get('tradeId', str(time.time()))
         pnl = float(f.get('pnl', 0) or 0)
         fee = float(f.get('fee', 0) or 0)
-        sz  = float(f.get('sz', 0) or 0)
+        sz  = float(f.get('fillSz', 0) or 0)   # OKX fills-history는 'fillSz' 필드 사용 (sz 아님)
         px  = float(f.get('fillPx', 0) or 0)
         total_pnl += pnl
         total_fee += fee

@@ -655,7 +655,9 @@ function refreshToday(){
             var typColor=p.type==='scalp'?'var(--muted2)':'var(--yellow)';
             var pnlStr=p.pnl!==undefined?(p.pnl>=0?'+':'')+p.pnl.toFixed(2)+' U':'—';
             var openPx=p.open_price?p.open_price.toLocaleString():'이전날';
+            var timeRange=(p.open_time||'—')+' → '+(p.close_time||'—');
             return '<div class="trade-row" style="background:rgba(255,255,255,.02);margin:2px 0;border-radius:3px">'+
+              '<span class="t-time" style="min-width:110px">'+timeRange+'</span>'+
               '<span class="t-side '+sc+'" style="min-width:50px">'+(sc==='long'?'LONG':'SHORT')+'</span>'+
               '<span class="t-inst">'+p.inst+'</span>'+
               '<span style="font-family:var(--mono);font-size:10px;color:var(--muted2)">'+openPx+' → '+p.close_price.toLocaleString()+'</span>'+
@@ -671,6 +673,7 @@ function refreshToday(){
           pairHtml += swings.map(function(s){
             var sc=s.pos_side==='long'?'long':'short';
             return '<div class="trade-row" style="background:rgba(245,197,24,.04);border-left:2px solid var(--yellow);margin:2px 0">'+
+              '<span class="t-time" style="min-width:58px">'+(s.open_time||'—')+'</span>'+
               '<span class="t-side '+sc+'">'+(sc==='long'?'LONG':'SHORT')+'</span>'+
               '<span class="t-inst">'+s.inst+'</span>'+
               '<span style="font-family:var(--mono);font-size:10px;color:var(--muted2)">진입 '+s.open_price.toLocaleString()+' | 수량 '+s.sz+'</span>'+
@@ -902,7 +905,9 @@ function openDayModal(id){
         var typeLabel=p.type==='scalp'?'SCALP':'SWING←';
         var tc=p.type==='scalp'?'var(--muted2)':'var(--yellow)';
         var openPx=p.open_price?p.open_price.toLocaleString():'이전날';
+        var timeRange=(p.open_time||'—')+'→'+(p.close_time||'—');
         return '<div class="trade-row">'+
+          '<span class="t-time" style="min-width:100px">'+timeRange+'</span>'+
           '<span class="t-side '+sc+'" style="min-width:50px">'+(sc==='long'?'LONG':'SHORT')+'</span>'+
           '<span class="t-inst">'+p.inst+'</span>'+
           '<span style="font-family:var(--mono);font-size:10px;color:var(--muted2)">'+openPx+'→'+p.close_price.toLocaleString()+'</span>'+
@@ -919,6 +924,7 @@ function openDayModal(id){
       swings.map(function(s){
         var sc=s.pos_side==='long'?'long':'short';
         return '<div class="trade-row">'+
+          '<span class="t-time" style="min-width:58px">'+(s.open_time||'—')+'</span>'+
           '<span class="t-side '+sc+'">'+(sc==='long'?'LONG':'SHORT')+'</span>'+
           '<span class="t-inst">'+s.inst+'</span>'+
           '<span style="font-family:var(--mono);font-size:10px;color:var(--muted2)">진입 '+s.open_price.toLocaleString()+' | 수량 '+s.sz+'</span>'+
