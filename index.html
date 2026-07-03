@@ -350,7 +350,21 @@ body{font-family:var(--sans);background:var(--bg);color:var(--text);min-height:1
 </div><!-- /main -->
 </div><!-- /app -->
 
-<!-- API 키 안내 모달 -->
+<!-- START BALANCE 설정 모달 -->
+<div class="modal-bg" id="startbal-modal">
+  <div class="modal">
+    <div class="modal-title">START BALANCE 설정</div>
+    <p style="font-family:var(--mono);font-size:10px;color:var(--muted2);margin-bottom:16px;line-height:1.8">
+      처음 입금한 금액과 날짜를 입력해주세요.<br>ALL-TIME PNL 계산의 기준이 됩니다.
+    </p>
+    <div class="form-group"><label>입금 날짜</label><input type="date" id="sb-date"></div>
+    <div class="form-group"><label>입금 금액 (USDT)</label><input type="number" id="sb-amount" step="1" placeholder="예: 500"></div>
+    <div class="modal-actions">
+      <button class="mbtn primary" onclick="saveStartBal()">저장</button>
+      <button class="mbtn" onclick="closeStartBalModal()">취소</button>
+    </div>
+  </div>
+</div>
 <div class="modal-bg" id="api-modal">
   <div class="modal">
     <div class="modal-title">OKX API CONFIGURATION</div>
@@ -437,10 +451,19 @@ function group(data,kf,lf){
 }
 
 /* ── 서버에서 일지 로드 ── */
+var startBalanceSetting = null;
+var startBalanceDateSetting = null;
+
 function loadJournal(cb){
   fetch(SERVER+'/api/journal',{signal:AbortSignal.timeout(4000)})
     .then(function(r){return r.json();})
-    .then(function(d){journalData=d.data||[];updateTicker();if(cb)cb();})
+    .then(function(d){
+      journalData=d.data||[];
+      startBalanceSetting=d.start_balance||null;
+      startBalanceDateSetting=d.start_balance_date||null;
+      updateTicker();
+      if(cb)cb();
+    })
     .catch(function(){if(cb)cb();});
 }
 
@@ -562,7 +585,30 @@ function refreshPositions(){
     }).catch(function(){});
 }
 
-/* ── Guardian 제어 ── */
+/* ── START BALANCE 모달 ── */
+function openStartBalModal(){
+  document.getElementById('sb-date').value=startBalanceDateSetting||todayKST();
+  document.getElementById('sb-amount').value=startBalanceSetting||'';
+  document.getElementById('startbal-modal').classList.add('open');
+}
+function closeStartBalModal(){document.getElementById('startbal-modal').classList.remove('open');}
+document.getElementById('startbal-modal').addEventListener('click',function(e){if(e.target===this)closeStartBalModal();});
+function saveStartBal(){
+  var bal=parseFloat(document.getElementById('sb-amount').value);
+  var date=document.getElementById('sb-date').value;
+  if(isNaN(bal)||!date){alert('날짜와 금액을 입력해주세요.');return;}
+  fetch(SERVER+'/api/settings/start-balance',{
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({balance:bal,date:date})
+  }).then(function(r){return r.json();})
+    .then(function(d){
+      if(d.ok){
+        closeStartBalModal();
+        loadJournal(function(){renderAll();});
+      }
+    }).catch(function(){alert('저장 실패');});
+}
 var guardianSkipSl = true;
 var guardianPosConfig = {};  // {"BTC-USDT-SWAP-long": true/false}
 

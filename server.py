@@ -45,12 +45,37 @@ def init_db():
                         updated_at  TIMESTAMPTZ DEFAULT NOW()
                     )
                 """)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS settings (
+                        key   TEXT PRIMARY KEY,
+                        value TEXT NOT NULL
+                    )
+                """)
             conn.commit()
         print('[DB] 테이블 준비 완료')
         return True
     except Exception as e:
         print(f'[DB] init error: {e}')
         return False
+
+def db_get_setting(key, default=None):
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT value FROM settings WHERE key=%s", (key,))
+                row = cur.fetchone()
+        return row[0] if row else default
+    except Exception:
+        return default
+
+def db_set_setting(key, value):
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO settings (key, value) VALUES (%s, %s)
+                ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value
+            """, (key, str(value)))
+        conn.commit()
 
 def db_load_journal():
     with get_db() as conn:
@@ -162,13 +187,63 @@ def yesterday_kst():
     return (datetime.datetime.now(tz=KST) - datetime.timedelta(days=1)).strftime('%Y-%m-%d')
 
 # ── OKX 데이터 fetch ─────────────────────────────────────
+def fetch_day_balances(date_str):
+    """
+    OKX bills API로 해당 날짜의 시작잔고/마감잔고 계산.
+    bills는 최신순으로 내려오므로 역순 정렬 후 처리.
+    """
+    start_ms = date_to_ms_kst(date_str, end=False)
+    end_ms   = date_to_ms_kst(date_str, end=True)
+
+    # SWAP 관련 bill 타입: 실현손익(8), 수수료(14), 자금비용(6)
+    bills_r = okx_request('/api/v5/account/bills-archive', {
+        'ccy':   'USDT',
+        'begin': str(start_ms),
+        'end':   str(end_ms),
+        'limit': '100',
+    })
+
+    if bills_r.get('code') != '0' or not bills_r.get('data'):
+        # bills-archive 실패 시 일반 bills 시도
+        bills_r = okx_request('/api/v5/account/bills', {
+            'ccy':   'USDT',
+            'begin': str(start_ms),
+            'end':   str(end_ms),
+            'limit': '100',
+        })
+
+    bills = bills_r.get('data', [])
+    if not bills:
+        return None, None
+
+    # bills는 최신순 → 오름차순 정렬
+    bills_sorted = sorted(bills, key=lambda b: int(b.get('ts', 0)))
+
+    # 첫 번째 bill 직전 잔고 = 시작잔고
+    # bal 필드: 해당 bill 처리 후 잔고
+    # 시작잔고 = 첫 bill의 bal - 첫 bill의 pnl 변화량
+    try:
+        first_bal_after = float(bills_sorted[0].get('bal', 0))
+        first_pnl_chg   = float(bills_sorted[0].get('balChg', 0))
+        open_bal  = round(first_bal_after - first_pnl_chg, 2)
+        close_bal = round(float(bills_sorted[-1].get('bal', 0)), 2)
+    except Exception as e:
+        print(f'[bills] parse error: {e}')
+        return None, None
+
+    print(f'[bills] {date_str} {len(bills)}건 | 시작:{open_bal} → 마감:{close_bal}')
+    return open_bal, close_bal
+
 def fetch_okx_daily(date_str):
     start_ms = date_to_ms_kst(date_str, end=False)
     end_ms   = date_to_ms_kst(date_str, end=True)
+
+    # 1) 체결 내역
     fills = okx_request('/api/v5/trade/fills-history', {
         'instType': 'SWAP', 'begin': str(start_ms), 'end': str(end_ms), 'limit': '100'
     })
     print(f'[fills] {date_str} code={fills.get("code")} count={len(fills.get("data",[]))}')
+
     trades, total_pnl, total_fee = [], 0.0, 0.0
     if fills.get('code') == '0':
         for f in fills.get('data', []):
@@ -186,26 +261,38 @@ def fetch_okx_daily(date_str):
                 'pnl':      pnl,
                 'fee':      fee,
             })
+
     if not trades:
         return None
-    bal_r = okx_request('/api/v5/account/balance', {'ccy': 'USDT'})
-    current_bal = 0.0
-    if bal_r.get('code') == '0':
-        try:
-            item = next((d for d in bal_r['data'][0]['details'] if d['ccy'] == 'USDT'), None)
-            current_bal = float(item['eq']) if item else 0.0
-        except Exception as e:
-            print(f'[balance] parse error: {e}')
-    net = total_pnl + total_fee
-    open_bal  = round(current_bal - net, 2)
-    close_bal = round(current_bal, 2)
-    pnl_pct   = round((net / open_bal * 100) if open_bal else 0, 4)
+
+    # 2) bills 기반 정확한 시작/마감 잔고
+    open_bal, close_bal = fetch_day_balances(date_str)
+
+    # bills 실패 시 역산 폴백
+    if open_bal is None:
+        print(f'[bills] 폴백 — 현재잔고 역산 방식 사용')
+        bal_r = okx_request('/api/v5/account/balance', {'ccy': 'USDT'})
+        current_bal = 0.0
+        if bal_r.get('code') == '0':
+            try:
+                item = next((d for d in bal_r['data'][0]['details'] if d['ccy'] == 'USDT'), None)
+                current_bal = float(item['eq']) if item else 0.0
+            except Exception:
+                pass
+        net = total_pnl + total_fee
+        open_bal  = round(current_bal - net, 2)
+        close_bal = round(current_bal, 2)
+    else:
+        net = round(close_bal - open_bal, 2)
+
+    pnl_pct = round((net / open_bal * 100) if open_bal else 0, 4)
+
     return {
         'id': int(time.time()*1000), 'date': date_str,
         'open': open_bal, 'close': close_bal, 'pnl': pnl_pct,
         'trade_count': len(trades), 'trades': trades,
         'pos': '', 'memo': f'거래 {len(trades)}회 (OKX 자동)',
-        'pnl_usdt': round(net,2), 'pnl_pct': pnl_pct,
+        'pnl_usdt': round(net, 2), 'pnl_pct': pnl_pct,
         'open_bal': open_bal, 'close_bal': close_bal,
     }
 
@@ -292,10 +379,36 @@ def test_connection():
     ok = result.get('code') == '0'
     return jsonify({'ok': ok, 'msg': '연결 성공!' if ok else result.get('msg','연결 실패')})
 
+@app.route('/api/settings/start-balance', methods=['GET'])
+def get_start_balance():
+    val  = db_get_setting('start_balance')
+    date = db_get_setting('start_balance_date')
+    return jsonify({'ok': True, 'balance': float(val) if val else None, 'date': date})
+
+@app.route('/api/settings/start-balance', methods=['POST'])
+def set_start_balance():
+    body = request.json or {}
+    bal  = body.get('balance')
+    date = body.get('date', today_kst())
+    if bal is None:
+        return jsonify({'ok': False, 'msg': '금액을 입력해주세요.'}), 400
+    db_set_setting('start_balance', float(bal))
+    db_set_setting('start_balance_date', date)
+    print(f'[settings] START BALANCE: {bal} USDT ({date})')
+    return jsonify({'ok': True})
+
 @app.route('/api/journal')
 def get_journal():
     try:
-        return jsonify({'ok': True, 'data': db_load_journal()})
+        data = db_load_journal()
+        start_bal  = db_get_setting('start_balance')
+        start_date = db_get_setting('start_balance_date')
+        return jsonify({
+            'ok': True,
+            'data': data,
+            'start_balance': float(start_bal) if start_bal else None,
+            'start_balance_date': start_date,
+        })
     except Exception as e:
         print(f'[journal] error: {e}')
         return jsonify({'ok': False, 'data': [], 'msg': str(e)})
