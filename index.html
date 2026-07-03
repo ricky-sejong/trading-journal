@@ -784,7 +784,10 @@ function togglePosGuardian(posKey){
   }).then(function(r){return r.json();})
     .then(function(d){
       if(d.ok){
-        console.log('[Guardian]',posKey,'→',newVal?'ON':'OFF');
+        console.log('[Guardian]',posKey,'→',newVal?'ON':'OFF','| DB저장:',d.db_persisted);
+        if(d.db_persisted===false){
+          alert('⚠️ 설정은 적용됐지만 DB 저장에 실패했어요.\n서버 재시작 시 이 설정이 초기화될 수 있어요.');
+        }
         // 포지션 테이블 즉시 갱신
         refreshPositions();
       }

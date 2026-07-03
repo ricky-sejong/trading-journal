@@ -663,14 +663,23 @@ def guardian_positions_set():
             pg.guardian_pos_config = {}
         pg.guardian_pos_config[pos_key] = enabled
 
-        # DB에도 영속 저장 (재배포/재시작에도 유지)
+        # DB에도 영속 저장 (재배포/재시작에도 유지) — 저장 후 즉시 재확인
+        db_write_ok = False
         try:
             db_set_setting(f'guardian_pos:{pos_key}', 'true' if enabled else 'false')
+            # 읽어서 실제로 저장됐는지 검증
+            verify_val = db_get_setting(f'guardian_pos:{pos_key}')
+            db_write_ok = (verify_val == ('true' if enabled else 'false'))
+            if db_write_ok:
+                print(f'[Guardian] DB 저장 확인됨: guardian_pos:{pos_key} = {verify_val}')
+            else:
+                print(f'[Guardian] ⚠️ DB 저장 검증 실패! 기대값={enabled} 실제값={verify_val}')
         except Exception as db_e:
-            print(f'[Guardian] DB 저장 실패 (메모리는 반영됨): {db_e}')
+            print(f'[Guardian] ⚠️ DB 저장 예외 발생 (메모리는 반영됨): {db_e}')
 
-        print(f'[Guardian] {pos_key} → {"ON" if enabled else "OFF"} | 현재 전체설정: {pg.guardian_pos_config}')
+        print(f'[Guardian] {pos_key} → {"ON" if enabled else "OFF"} | DB저장={"성공" if db_write_ok else "실패"} | 현재 전체설정: {pg.guardian_pos_config}')
         return jsonify({'ok': True, 'pos_key': pos_key, 'enabled': enabled,
+                         'db_persisted': db_write_ok,
                          'current_config': pg.guardian_pos_config})
     except Exception as e:
         return jsonify({'ok': False, 'msg': str(e)})
