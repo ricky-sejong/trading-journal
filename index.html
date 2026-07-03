@@ -576,7 +576,7 @@ function updateTicker(){
   if(!data.length && !startBalanceSetting)return;
   var startBal=startBalanceSetting||(data.length?data[0].open:0);
   var curBal=currentBalanceLive||(data.length?data[data.length-1].close:startBal);
-  var totalAmt=curBal-startBal,totalPct=startBal?(curBal-startBal)/startBal*100;
+  var totalAmt=curBal-startBal,totalPct=startBal?(curBal-startBal)/startBal*100:0;
   var wins=data.filter(function(d){return d.pnl>0;}).length;
   var avg=data.reduce(function(s,d){return s+(d.pnl||0);},0)/data.length;
   var todayEntry=data.find(function(d){return d.date===todayKST();});
