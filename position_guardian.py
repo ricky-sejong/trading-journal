@@ -267,6 +267,8 @@ class OKXClient:
 
         log.info(f"신규 TP/SL 요청: {json.dumps(body, ensure_ascii=False)}")
         return self._req("POST", "/api/v5/trade/order-algo", body=body)
+
+    def get_klines(self, inst_id, bar, limit):
         """
         캔들 조회. OKX bar 값: 1m 3m 5m 15m 30m 1H 4H 1D
         반환: [[ts, open, high, low, close, vol, volCcy, volCcyQuote, confirm], ...]
@@ -280,44 +282,6 @@ class OKXClient:
             return []
         return list(reversed(d.get("data", [])))  # 오래된 것 → 최신 순으로 정렬
 
-    def set_tpsl(self, inst_id, pos_side, sl_price=None, tp_price=None):
-
-        # 포지션 조회해서 실제 mgnMode 가져오기
-        pos = self.get_all_positions()
-
-        td_mode = "cross"
-
-        for p in pos:
-            if p["instId"] == inst_id and p["posSide"] == pos_side:
-                td_mode = p.get("mgnMode", "cross")
-                break
-
-        body = {
-            "instId":        inst_id,
-            "tdMode":        td_mode,
-            "side":          "sell" if pos_side == "long" else "buy",  # 필수: 청산 방향
-            "posSide":       pos_side,
-            "ordType":       "conditional",
-            "closeFraction": "1",   # 전량 청산
-        }
-
-        if sl_price is not None:
-            body["slTriggerPx"] = str(round(sl_price, 4))
-            body["slOrdPx"] = "-1"
-            body["slTriggerPxType"] = "mark"
-
-        if tp_price is not None:
-            body["tpTriggerPx"] = str(round(tp_price, 4))
-            body["tpOrdPx"] = "-1"
-            body["tpTriggerPxType"] = "mark"
-
-        log.info(f"TP/SL 요청: {json.dumps(body, indent=2)}")
-
-        return self._req(
-            "POST",
-            "/api/v5/trade/order-algo",
-            body=body
-        )
     def close_position_market(self, inst_id, pos_side):
 
         td_mode = "cross"
