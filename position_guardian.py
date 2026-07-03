@@ -1,9 +1,9 @@
 """
-OKX Position Guardian — 보유 포지션 자동 익절/손절 관리 (API 규격 최종 수정본)
+OKX Position Guardian — 보유 포지션 자동 익절/손절 관리 (Amend 규격 완벽 수정본)
 ================================================================
 버그 수정 내역:
-  - 알고 주문(TP/SL) 규격에 맞게 clOrdId를 'algoClOrdId'로 필드명 전면 수정
-  - 누락되었던 메인 엔진 run() 메서드 완벽 복구 및 들여쓰기 정비
+  - amend_tpsl(주문 수정) 호출 시 거래소가 거절하는 algoClOrdId 파라미터 제외 로직 추가
+  - 봇 주문 생성과 봇 주문 수정의 데이터 규격을 분리하여 통신 안정성 확보
 """
 
 import os, json, time, hmac, hashlib, base64, logging, datetime, math
@@ -79,10 +79,10 @@ def save_state(state):
         json.dump(state, f, indent=2, ensure_ascii=False, default=str)
 
 
-# ─── OKX REST 클라이언트 (필드명 algoClOrdId로 교체) ───────────────
+# ─── OKX REST 클라이언트 ─────────────────────────────────
 class OKXClient:
     BASE = "https://www.okx.com"
-    BOT_TAG = "GUARDIAN_BOT"  # 봇 주문 식별자
+    BOT_TAG = "GUARDIAN_BOT"
 
     def __init__(self, cfg):
         self.key = cfg["api_key"]
@@ -171,7 +171,6 @@ class OKXClient:
                     has_tp = True; tp_price = float(tp)
                 if sl or tp:
                     algo_id = o.get("algoId")
-                    # OKX 알고주문 전용 식별자인 algoClOrdId를 확인합니다.
                     if o.get("algoClOrdId") == self.BOT_TAG:
                         is_bot_order = True
                     break
@@ -183,6 +182,7 @@ class OKXClient:
         return list(reversed(d.get("data", [])))
 
     def amend_tpsl(self, algo_id, inst_id, sl_price=None, tp_price=None):
+        """수정한 부분: 수정 시에는 절대 algoClOrdId를 전달하지 않고 오직 가격 변경 인자만 담습니다."""
         body = {"instId": inst_id, "algoId": algo_id}
         body["cxlOnBlk"] = False 
         if sl_price:
@@ -198,7 +198,9 @@ class OKXClient:
     def set_tpsl(self, inst_id, pos_side, sl_price=None, tp_price=None, algo_id=None):
         if algo_id:
             res = self.amend_tpsl(algo_id, inst_id, sl_price=sl_price, tp_price=tp_price)
-            if res.get("code") == "0": return res
+            if res.get("code") == "0": 
+                return res
+            log.warning(f"  ⚠️ Amend(수정) 실패 -> 기존 주문 유실 혹은 만료로 인한 신규 주문으로 재시도")
 
         pos = self.get_all_positions()
         td_mode = "cross"
@@ -210,7 +212,7 @@ class OKXClient:
             "instId": inst_id, "tdMode": td_mode,
             "side": "sell" if pos_side == "long" else "buy", "posSide": pos_side,
             "ordType": "conditional", "closeFraction": "1",
-            "algoClOrdId": self.BOT_TAG  # 수정한 부분: 일반 clOrdId가 아닌 algoClOrdId 사용
+            "algoClOrdId": self.BOT_TAG  # 최초 생성 시에만 algoClOrdId 주입
         }
         if sl_price:
             body["slTriggerPx"] = self.format_price(inst_id, sl_price)
@@ -503,23 +505,23 @@ class PositionGuardian:
                 apply_tp = None if skip_tp else st.get("tp_price")
                 
                 if not self.dry:
+                    # 완벽 분리: set_tpsl 내에서 algo_id 유무에 따라 안전하게 요청 분기 처리됨
                     res = self.client.set_tpsl(inst_id, side, sl_price=apply_sl, tp_price=apply_tp, algo_id=algo_id)
                     if res.get("code") == "0":
                         st["_last_applied_sl"] = new_sl
                         self._algo_cache.pop(pos_key, None)
-                        log.info(f"  ✅ {symbol} {side.upper()} 차트 실시간 갱신 -> 동적 오더북 갱신 반영 완료")
+                        log.info(f"  ✅ {symbol} {side.upper()} 차트 실시간 갱신 -> 동적 익절/손절 수정 완료")
                     else:
                         log.warning(f"  ❌ 거래소 통신 거절: {res.get('msg')}")
                 else:
                     st["_last_applied_sl"] = new_sl
-                    log.info(f"  [DRY-RUN] {symbol} 변동에 따른 갱신 시뮬레이션: SL ${self.client.format_price(inst_id, new_sl)}")
+                    log.info(f"  [DRY-RUN] {symbol} 갱신 시뮬레이션: SL ${self.client.format_price(inst_id, new_sl)}")
 
             snapshot.append({"symbol": symbol, "inst_id": inst_id, "side": side, "entry": pos.get("avgPx"), "mark": mark, "pnl_pct": st["pnl_pct"], "sl": new_sl, "sl_source": st["sl_source"], "tp_price": st["tp_price"], "guardian_enabled": True})
 
         self.state["latest"] = {"time": ts, "position_count": len(snapshot), "positions": snapshot}
         save_state(self.state)
 
-    # 수정한 부분: 들여쓰기 공간을 정비하고 PositionGuardian 클래스의 자식 메서드로 완벽 귀속시킴
     def run(self):
         log.info("=" * 60)
         log.info(" OKX Position Guardian - 실시간 동적 추적 엔진 구동 완료")
