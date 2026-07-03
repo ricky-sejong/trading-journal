@@ -15,7 +15,7 @@ Bitget 버전을 OKX API v5 기준으로 완전 변환.
 """
 
 import os, json, time, hmac, hashlib, base64, logging, datetime, math
-import urllib.request, urllib.parse
+import urllib.request, urllib.parse, urllib.error
 from pathlib import Path
 
 # ─── 로깅 ───────────────────────────────────────────────
@@ -111,27 +111,56 @@ class OKXClient:
     def _req(self, method, path, params=None, body=None):
         query = ('?' + urllib.parse.urlencode(params)) if params else ''
         full_path = path + query
-        ts  = self._ts()
-        b   = json.dumps(body) if body else ""
+
+        ts = self._ts()
+        b = json.dumps(body) if body else ""
+
         sig = self._sign(ts, method, full_path, b)
+
         headers = {
-            'OK-ACCESS-KEY':        self.key,
-            'OK-ACCESS-SIGN':       sig,
-            'OK-ACCESS-TIMESTAMP':  ts,
-            'OK-ACCESS-PASSPHRASE': self.pp,
-            'Content-Type':         'application/json',
-            'User-Agent':           'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            "OK-ACCESS-KEY": self.key,
+            "OK-ACCESS-SIGN": sig,
+            "OK-ACCESS-TIMESTAMP": ts,
+            "OK-ACCESS-PASSPHRASE": self.pp,
+            "Content-Type": "application/json",
         }
+
         url = self.BASE + full_path
+
         try:
-            data = b.encode() if b else None
-            req  = urllib.request.Request(url, data=data, headers=headers, method=method)
+            req = urllib.request.Request(
+                url,
+                data=b.encode() if b else None,
+                headers=headers,
+                method=method
+            )
+
             with urllib.request.urlopen(req, timeout=10) as resp:
                 return json.loads(resp.read().decode())
-        except Exception as e:
-            log.error(f"OKX 요청 실패 {path}: {e}")
-            return {"code": "-1", "msg": str(e)}
 
+        except urllib.error.HTTPError as e:
+
+            body = e.read().decode()
+
+            log.error("=" * 60)
+            log.error(f"HTTP {e.code}")
+            log.error(body)
+            log.error("=" * 60)
+
+            try:
+                return json.loads(body)
+            except:
+                return {
+                    "code": "-1",
+                    "msg": body
+                }
+
+        except Exception as e:
+            log.error(e)
+            return {
+                "code": "-1",
+                "msg": str(e)
+            }
     def get_all_positions(self):
         """모든 SWAP 포지션 조회"""
         d = self._req("GET", "/api/v5/account/positions", {"instType": "SWAP"})
@@ -181,34 +210,61 @@ class OKXClient:
         return list(reversed(d.get("data", [])))  # 오래된 것 → 최신 순으로 정렬
 
     def set_tpsl(self, inst_id, pos_side, sl_price=None, tp_price=None):
-        """
-        OKX 포지션 TP/SL 설정.
-        pos_side: 'long' or 'short'
-        """
+
+        # 포지션 조회해서 실제 mgnMode 가져오기
+        pos = self.get_all_positions()
+
+        td_mode = "cross"
+
+        for p in pos:
+            if p["instId"] == inst_id and p["posSide"] == pos_side:
+                td_mode = p.get("mgnMode", "cross")
+                break
+
         body = {
-            "instId":  inst_id,
-            "tdMode":  "cross",
+            "instId": inst_id,
+            "tdMode": td_mode,
             "posSide": pos_side,
+            "ordType": "conditional"
         }
-        if sl_price:
-            body["slTriggerPx"] = f"{sl_price:.4f}"
-            body["slOrdPx"]     = "-1"   # 시장가 청산
+
+        if sl_price is not None:
+            body["slTriggerPx"] = str(round(sl_price, 4))
+            body["slOrdPx"] = "-1"
             body["slTriggerPxType"] = "mark"
-        if tp_price:
-            body["tpTriggerPx"] = f"{tp_price:.4f}"
-            body["tpOrdPx"]     = "-1"
+
+        if tp_price is not None:
+            body["tpTriggerPx"] = str(round(tp_price, 4))
+            body["tpOrdPx"] = "-1"
             body["tpTriggerPxType"] = "mark"
-        return self._req("POST", "/api/v5/trade/order-algo", body=body)
 
+        log.info(f"TP/SL 요청: {json.dumps(body, indent=2)}")
+
+        return self._req(
+            "POST",
+            "/api/v5/trade/order-algo",
+            body=body
+        )
     def close_position_market(self, inst_id, pos_side):
-        """포지션 시장가 전량 청산"""
-        body = {
-            "instId":  inst_id,
-            "posSide": pos_side,
-            "mgnMode": "cross",
-        }
-        return self._req("POST", "/api/v5/trade/close-position", body=body)
 
+        td_mode = "cross"
+
+        for p in self.get_all_positions():
+            if p["instId"] == inst_id and p["posSide"] == pos_side:
+                td_mode = p.get("mgnMode", "cross")
+                break
+
+        body = {
+            "instId": inst_id,
+            "posSide": pos_side,
+            "mgnMode": td_mode
+        }
+
+        return self._req(
+            "POST",
+            "/api/v5/trade/close-position",
+            body=body
+        )
 
 # ─── 지표 & 차트 구조 분석 ──────────────────────────────
 def calc_atr(highs, lows, closes, period=14):
