@@ -7,13 +7,17 @@ OKX 매매일지 Flask 서버 — Render + Supabase 버전
   OKX_PASSPHRASE : OKX Passphrase
 """
 
-import json, hmac, base64, hashlib, time, datetime, os, threading
+import json, hmac, base64, hashlib, time, datetime, os, threading, sys
 from zoneinfo import ZoneInfo
 from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
 import urllib.request, urllib.parse
 import psycopg2, psycopg2.extras
 from apscheduler.schedulers.background import BackgroundScheduler
+
+# stdout 버퍼링 비활성화 — Render 로그에 print()가 즉시 안 뜨는 문제 방지
+sys.stdout.reconfigure(line_buffering=True)
+sys.stderr.reconfigure(line_buffering=True)
 
 app = Flask(__name__, static_folder='.')
 CORS(app)
