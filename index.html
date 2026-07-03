@@ -121,9 +121,14 @@ body{font-family:var(--sans);background:var(--bg);color:var(--text);min-height:1
 .cal-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:2px}
 .cal-dow{font-family:var(--mono);font-size:9px;color:var(--muted);text-align:center;padding:6px 0;letter-spacing:.1em}
 .cal-cell{background:var(--bg2);border:1px solid transparent;min-height:62px;padding:6px 8px;display:flex;flex-direction:column;gap:2px}
-.cal-cell.has-data{border-color:var(--border);cursor:pointer}
-.cal-cell.has-data:hover{border-color:var(--yellow);background:var(--bg3)}
+.cal-cell.has-data{cursor:pointer}
+.cal-cell.has-data.profit{border-color:rgba(0,212,170,0.5)}
+.cal-cell.has-data.profit:hover{border-color:var(--green);background:var(--bg3)}
+.cal-cell.has-data.loss{border-color:rgba(255,68,85,0.5)}
+.cal-cell.has-data.loss:hover{border-color:var(--red);background:var(--bg3)}
 .cal-cell.today{border-color:var(--border2)}
+.cal-cell.has-data.today.profit{border-color:var(--green)}
+.cal-cell.has-data.today.loss{border-color:var(--red)}
 .cal-day{font-family:var(--mono);font-size:10px;color:var(--muted)}
 .cal-pnl{font-family:var(--mono);font-size:12px;font-weight:600;margin-top:auto}
 .cal-pnl.pos{color:var(--green)}.cal-pnl.neg{color:var(--red)}
@@ -850,12 +855,17 @@ function renderCalendar(){
     var dateStr=calYear+'-'+mm+'-'+dd;
     var entry=map[dateStr];
     var isToday=dateStr===todayStr;
-    var cls='cal-cell'+(entry?' has-data':'')+(isToday?' today':'');
+    var pnlClass='';
+    if(entry){
+      var pct=entry.pnl||0;
+      pnlClass=pct>0?' profit':pct<0?' loss':'';
+    }
+    var cls='cal-cell'+(entry?' has-data'+pnlClass:'')+(isToday?' today':'');
     var onclick=entry?'onclick="openDayModal('+entry.id+')"':'';
     var inner='<div class="cal-day">'+day+'</div>';
     if(entry){
       var amt=Math.round(entry.close-entry.open),pct=entry.pnl||0;
-      var c2=amt>=0?'pos':'neg';
+      var c2=pct>0?'pos':pct<0?'neg':'z';
       inner+='<div class="cal-pnl '+c2+'">'+sg(amt)+fn(Math.abs(amt))+'</div>';
       inner+='<div class="cal-pct '+c2+'">'+sg(pct)+pct.toFixed(1)+'%</div>';
     }
