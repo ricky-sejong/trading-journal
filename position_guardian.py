@@ -225,7 +225,7 @@ class OKXClient:
             body["newTpOrdPx"]         = "-1"
             body["newTpTriggerPxType"] = "mark"
         log.info(f"AMEND 요청: algoId={algo_id} SL={sl_price} TP={tp_price}")
-        return self._req("POST", "/api/v5/trade/amend-algo-order", body=body)
+        return self._req("POST", "/api/v5/trade/amend-algos", body=body)
 
     def set_tpsl(self, inst_id, pos_side, sl_price=None, tp_price=None, algo_id=None):
         """
@@ -1119,7 +1119,7 @@ class PositionGuardian:
                         self._algo_cache.pop(cache_key, None)
                         log.info(f"     → SL 갱신 완료{' (TP 건너뜀)' if skip_tp else ''}")
                     else:
-                        log.warning(f"     → SL 갱신 실패: {res.get('msg')}")
+                        log.warning(f"     → SL 갱신 실패: {res.get('msg')} | 전체응답: {json.dumps(res, ensure_ascii=False)}")
                 else:
                     st["_last_applied_sl"] = new_sl
                     if apply_tp is not None:
