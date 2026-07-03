@@ -202,6 +202,7 @@ def fetch_day_balances(date_str):
         'end':   str(end_ms),
         'limit': '100',
     })
+    print(f'[bills-archive] code={bills_r.get("code")} msg={bills_r.get("msg","")} count={len(bills_r.get("data",[]))}')
 
     if bills_r.get('code') != '0' or not bills_r.get('data'):
         # bills-archive 실패 시 일반 bills 시도
@@ -211,6 +212,7 @@ def fetch_day_balances(date_str):
             'end':   str(end_ms),
             'limit': '100',
         })
+        print(f'[bills] code={bills_r.get("code")} msg={bills_r.get("msg","")} count={len(bills_r.get("data",[]))}')
 
     bills = bills_r.get('data', [])
     if not bills:

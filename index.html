@@ -802,15 +802,19 @@ function delEntry(id){
 /* ── 렌더링 ── */
 function renderBanner(data){
   var el=document.getElementById('at-banner');
-  if(!data.length){el.innerHTML='<div class="at-cell" style="grid-column:1/-1"><div class="at-label">STATUS</div><div class="at-val" style="font-size:13px;color:var(--muted2)">NO DATA — CONNECT OKX API TO START</div></div>';return;}
-  var startBal=data[0].open,curBal=data[data.length-1].close;
-  var totalAmt=curBal-startBal,totalPct=(curBal-startBal)/startBal*100;
+  // START BALANCE: 설정값 우선, 없으면 첫 기록 시작잔고
+  var startBal=startBalanceSetting||(data.length?data[0].open:0);
+  var startDate=startBalanceDateSetting||(data.length?data[0].date:'—');
+  var curBal=data.length?data[data.length-1].close:startBal;
+  var totalAmt=curBal-startBal;
+  var totalPct=startBal?(totalAmt/startBal*100):0;
   var wins=data.filter(function(d){return d.pnl>0;}).length;
   var losses=data.filter(function(d){return d.pnl<0;}).length;
+  var editBtn='<span style="color:var(--yellow);cursor:pointer;font-size:9px;margin-left:6px" onclick="openStartBalModal()">✎ SET</span>';
   el.innerHTML=
     '<div class="at-cell"><div class="at-label">ALL-TIME PNL</div><div class="at-val '+pc(totalAmt)+'">'+sg(totalAmt)+fn(totalAmt)+' USDT</div><div class="at-sub">'+sg(totalPct)+totalPct.toFixed(2)+'%</div></div>'+
-    '<div class="at-cell"><div class="at-label">START BALANCE</div><div class="at-val">'+fn(startBal)+' USDT</div><div class="at-sub">'+fd(data[0].date)+'</div></div>'+
-    '<div class="at-cell"><div class="at-label">CURRENT BALANCE</div><div class="at-val">'+fn(curBal)+' USDT</div><div class="at-sub">'+fd(data[data.length-1].date)+'</div></div>'+
+    '<div class="at-cell"><div class="at-label">START BALANCE'+editBtn+'</div><div class="at-val">'+fn(startBal)+' USDT</div><div class="at-sub">'+fd(startDate)+'</div></div>'+
+    '<div class="at-cell"><div class="at-label">CURRENT BALANCE</div><div class="at-val">'+fn(curBal)+' USDT</div><div class="at-sub">'+(data.length?fd(data[data.length-1].date):'—')+'</div></div>'+
     '<div class="at-cell"><div class="at-label">WIN / LOSS DAYS</div><div class="at-val"><span style="color:var(--green)">'+wins+'</span> / <span style="color:var(--red)">'+losses+'</span></div><div class="at-sub">'+data.length+' TOTAL DAYS</div></div>';
 }
 
