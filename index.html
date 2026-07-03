@@ -842,9 +842,9 @@ function stopAutoRefresh(){
 
 function triggerBackfill(){
   setConn('spin','SYNCING 7D...');
-  fetch(SERVER+'/api/sync/auto',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({days:7})})
+  fetch(SERVER+'/api/sync/auto',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({days:7,force:true})})
     .then(function(r){return r.json();})
-    .then(function(){setConn('spin','SYNC IN PROGRESS...');setTimeout(function(){loadJournal(function(){renderAll();renderCalendar();});checkConn();},4000);})
+    .then(function(){setConn('spin','SYNC IN PROGRESS...');setTimeout(function(){loadJournal(function(){renderAll();renderCalendar();});checkConn();},6000);})
     .catch(function(){setConn('off','SERVER OFFLINE');});
 }
 
@@ -963,12 +963,41 @@ function openDayModal(id){
   document.getElementById('day-trades-section').innerHTML=th;
   document.getElementById('day-modal-actions').innerHTML=
     '<button class="mbtn primary" onclick="openEdit('+id+')">EDIT</button>'+
+    '<button class="mbtn" onclick="resyncDay(\''+entry.date+'\')">🔄 RESYNC</button>'+
     '<button class="mbtn danger" onclick="delEntry('+id+')">DELETE</button>'+
     '<button class="mbtn" style="margin-left:auto" onclick="closeDayModal()">CLOSE</button>';
   document.getElementById('day-modal').classList.add('open');
 }
 function closeDayModal(){document.getElementById('day-modal').classList.remove('open');}
 document.getElementById('day-modal').addEventListener('click',function(e){if(e.target===this)closeDayModal();});
+
+function resyncDay(dateStr){
+  var btn=event.target;
+  btn.textContent='SYNCING...';
+  btn.disabled=true;
+  fetch(SERVER+'/api/sync',{
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({date:dateStr})
+  }).then(function(r){return r.json();})
+    .then(function(d){
+      if(d.ok){
+        loadJournal(function(){
+          renderAll();renderCalendar();renderHistory();
+          var entry=journalData.find(function(e){return e.date===dateStr;});
+          if(entry)openDayModal(entry.id);
+        });
+      } else {
+        alert('재동기화 실패: '+(d.msg||'알 수 없는 오류'));
+        btn.textContent='🔄 RESYNC';
+        btn.disabled=false;
+      }
+    }).catch(function(){
+      alert('재동기화 실패');
+      btn.textContent='🔄 RESYNC';
+      btn.disabled=false;
+    });
+}
 
 function delEntry(id){
   if(!confirm('DELETE THIS RECORD?'))return;

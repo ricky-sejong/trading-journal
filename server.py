@@ -461,12 +461,12 @@ def auto_sync_date(date_str):
     print(f'[sync] {date_str} 거래 없음')
     return False
 
-def backfill(days=7):
+def backfill(days=7, force=False):
     try:
         existing = {d['date'] for d in db_load_journal()}
         for i in range(0, days+1):
             d = (datetime.datetime.now(tz=KST) - datetime.timedelta(days=i)).strftime('%Y-%m-%d')
-            if d not in existing:
+            if force or d not in existing:
                 auto_sync_date(d)
                 time.sleep(0.5)
             elif d == today_kst():
@@ -621,9 +621,10 @@ def sync_date():
 
 @app.route('/api/sync/auto', methods=['POST'])
 def sync_auto():
-    days = (request.json or {}).get('days', 7)
-    threading.Thread(target=backfill, args=(days,), daemon=True).start()
-    return jsonify({'ok': True, 'msg': f'최근 {days}일 백필 시작'})
+    days  = (request.json or {}).get('days', 7)
+    force = (request.json or {}).get('force', False)
+    threading.Thread(target=backfill, args=(days, force), daemon=True).start()
+    return jsonify({'ok': True, 'msg': f'최근 {days}일 {"강제 " if force else ""}백필 시작'})
 
 @app.route('/api/sync/yesterday', methods=['POST'])
 def sync_yesterday():
