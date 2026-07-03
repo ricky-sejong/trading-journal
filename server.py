@@ -1,7 +1,7 @@
 """
 OKX 매매일지 Flask 서버 — Render + Supabase 버전
 환경변수 (Render Dashboard에서 설정):
-  DATABASE_URL   : Supabase PostgreSQL 연결 문자열
+  DATABASE_URL   : Supabase Session Pooler URI
   OKX_API_KEY    : OKX API Key
   OKX_SECRET_KEY : OKX Secret Key
   OKX_PASSPHRASE : OKX Passphrase
@@ -21,28 +21,37 @@ KST = ZoneInfo('Asia/Seoul')
 
 # ── DB ──────────────────────────────────────────────────
 def get_db():
-    return psycopg2.connect(os.environ['DATABASE_URL'], sslmode='require')
+    url = os.environ.get('DATABASE_URL', '')
+    # Session pooler는 pgbouncer=true 필요
+    if 'pooler.supabase.com' in url and 'pgbouncer' not in url:
+        url += '?pgbouncer=true' if '?' not in url else '&pgbouncer=true'
+    return psycopg2.connect(url, sslmode='require')
 
 def init_db():
-    with get_db() as conn:
-        with conn.cursor() as cur:
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS journal (
-                    id          BIGINT PRIMARY KEY,
-                    date        DATE UNIQUE NOT NULL,
-                    open_bal    NUMERIC,
-                    close_bal   NUMERIC,
-                    pnl         NUMERIC,
-                    pos         TEXT DEFAULT '',
-                    memo        TEXT DEFAULT '',
-                    trades      JSONB DEFAULT '[]',
-                    trade_count INTEGER DEFAULT 0,
-                    created_at  TIMESTAMPTZ DEFAULT NOW(),
-                    updated_at  TIMESTAMPTZ DEFAULT NOW()
-                )
-            """)
-        conn.commit()
-    print('[DB] 테이블 준비 완료')
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS journal (
+                        id          BIGINT PRIMARY KEY,
+                        date        DATE UNIQUE NOT NULL,
+                        open_bal    NUMERIC,
+                        close_bal   NUMERIC,
+                        pnl         NUMERIC,
+                        pos         TEXT DEFAULT '',
+                        memo        TEXT DEFAULT '',
+                        trades      JSONB DEFAULT '[]',
+                        trade_count INTEGER DEFAULT 0,
+                        created_at  TIMESTAMPTZ DEFAULT NOW(),
+                        updated_at  TIMESTAMPTZ DEFAULT NOW()
+                    )
+                """)
+            conn.commit()
+        print('[DB] 테이블 준비 완료')
+        return True
+    except Exception as e:
+        print(f'[DB] init error: {e}')
+        return False
 
 def db_load_journal():
     with get_db() as conn:
@@ -157,17 +166,15 @@ def yesterday_kst():
 def fetch_okx_daily(date_str):
     start_ms = date_to_ms_kst(date_str, end=False)
     end_ms   = date_to_ms_kst(date_str, end=True)
-
     fills = okx_request('/api/v5/trade/fills-history', {
         'instType': 'SWAP', 'begin': str(start_ms), 'end': str(end_ms), 'limit': '100'
     })
     print(f'[fills] {date_str} code={fills.get("code")} count={len(fills.get("data",[]))}')
-
     trades, total_pnl, total_fee = [], 0.0, 0.0
     if fills.get('code') == '0':
         for f in fills.get('data', []):
-            pnl = float(f.get('pnl', 0))
-            fee = float(f.get('fee', 0))
+            pnl = float(f.get('pnl', 0) or 0)
+            fee = float(f.get('fee', 0) or 0)
             total_pnl += pnl
             total_fee += fee
             trades.append({
@@ -180,12 +187,9 @@ def fetch_okx_daily(date_str):
                 'pnl':      pnl,
                 'fee':      fee,
             })
-
     if not trades:
         return None
-
     bal_r = okx_request('/api/v5/account/balance', {'ccy': 'USDT'})
-    print(f'[balance] code={bal_r.get("code")} msg={bal_r.get("msg","")}')
     current_bal = 0.0
     if bal_r.get('code') == '0':
         try:
@@ -193,12 +197,10 @@ def fetch_okx_daily(date_str):
             current_bal = float(item['eq']) if item else 0.0
         except Exception as e:
             print(f'[balance] parse error: {e}')
-
     net = total_pnl + total_fee
     open_bal  = round(current_bal - net, 2)
     close_bal = round(current_bal, 2)
     pnl_pct   = round((net / open_bal * 100) if open_bal else 0, 4)
-
     return {
         'id': int(time.time()*1000), 'date': date_str,
         'open': open_bal, 'close': close_bal, 'pnl': pnl_pct,
@@ -235,22 +237,24 @@ def midnight_job():
     print(f'[scheduler] 자정 자동 저장: {yesterday_kst()}')
     auto_sync_date(yesterday_kst())
 
-# ── 스케줄러 ─────────────────────────────────────────────
-try:
-    scheduler = BackgroundScheduler(timezone=KST)
-    scheduler.add_job(midnight_job, 'cron', hour=0, minute=1)
-    scheduler.start()
-    threading.Thread(target=lambda: (time.sleep(5), backfill(7)), daemon=True).start()
-except Exception as e:
-    print(f'[scheduler] 시작 실패: {e}')
+# ── 초기화 (순서 중요: DB 먼저, 그 다음 스케줄러) ──────────
+db_ok = init_db()
 
-# DB 초기화
-try:
-    init_db()
-except Exception as e:
-    print(f'[DB] init error: {e}')
+# DB 초기화 성공 후 스케줄러 + 백필 시작
+if db_ok:
+    try:
+        scheduler = BackgroundScheduler(timezone=KST)
+        scheduler.add_job(midnight_job, 'cron', hour=0, minute=1)
+        scheduler.start()
+        # 서버 완전 기동 후 백필 (10초 대기)
+        threading.Thread(target=lambda: (time.sleep(10), backfill(7)), daemon=True).start()
+        print('[scheduler] 스케줄러 시작 완료')
+    except Exception as e:
+        print(f'[scheduler] 시작 실패: {e}')
+else:
+    print('[scheduler] DB 연결 실패로 스케줄러 건너뜀')
 
-# ── Position Guardian 백그라운드 실행 ─────────────────────
+# ── Position Guardian ─────────────────────────────────────
 def run_guardian():
     try:
         from position_guardian import PositionGuardian, load_config as guardian_cfg
@@ -271,7 +275,7 @@ def index():
 @app.route('/api/status')
 def status():
     cfg = get_okx_creds()
-    return jsonify({'has_key': bool(cfg['api_key'])})
+    return jsonify({'has_key': bool(cfg['api_key']), 'db_ok': db_ok})
 
 @app.route('/api/test')
 def test_connection():
@@ -282,7 +286,11 @@ def test_connection():
 
 @app.route('/api/journal')
 def get_journal():
-    return jsonify({'ok': True, 'data': db_load_journal()})
+    try:
+        return jsonify({'ok': True, 'data': db_load_journal()})
+    except Exception as e:
+        print(f'[journal] error: {e}')
+        return jsonify({'ok': False, 'data': [], 'msg': str(e)})
 
 @app.route('/api/journal/<int:entry_id>', methods=['PUT'])
 def update_journal(entry_id):
@@ -321,7 +329,6 @@ def sync_auto():
 
 @app.route('/api/sync/yesterday', methods=['POST'])
 def sync_yesterday():
-    """GitHub Actions에서 호출"""
     ok = auto_sync_date(yesterday_kst())
     return jsonify({'ok': ok, 'date': yesterday_kst()})
 
@@ -346,45 +353,28 @@ def get_positions():
         return jsonify({'ok': False, 'msg': result.get('msg')}), 400
     positions = []
     for p in result.get('data', []):
-        # 빈 문자열 방어
         try:
             contracts = float(p.get('pos', 0) or 0)
         except (ValueError, TypeError):
             contracts = 0
         if contracts == 0:
             continue
-
-        # ctVal: 계약 1개당 코인 수량. 빈 문자열이면 1로 폴백
         try:
             ct_val = float(p.get('ctVal', '') or 1)
-            if ct_val == 0:
-                ct_val = 1
+            if ct_val == 0: ct_val = 1
         except (ValueError, TypeError):
             ct_val = 1
-
-        # ctMult: 승수 (대부분 1, 일부 상품 다름)
         try:
             ct_mult = float(p.get('ctMult', '') or 1)
-            if ct_mult == 0:
-                ct_mult = 1
+            if ct_mult == 0: ct_mult = 1
         except (ValueError, TypeError):
             ct_mult = 1
-
         real_size = contracts * ct_val * ct_mult
-
-        # 소수점 정리
-        if real_size == int(real_size):
-            size_str = str(int(real_size))
-        else:
-            size_str = '{:.8f}'.format(real_size).rstrip('0')
-
-        # 현재가 (markPx)
+        size_str = str(int(real_size)) if real_size == int(real_size) else '{:.8f}'.format(real_size).rstrip('0')
         try:
             mark_px = float(p.get('markPx', 0) or 0)
         except (ValueError, TypeError):
             mark_px = 0
-
-        # UPL, uplRatio
         try:
             upl = float(p.get('upl', 0) or 0)
         except (ValueError, TypeError):
@@ -393,9 +383,7 @@ def get_positions():
             upl_pct = float(p.get('uplRatio', 0) or 0)
         except (ValueError, TypeError):
             upl_pct = 0
-
         print(f'[pos] {p.get("instId")} contracts={contracts} ctVal={ct_val} ctMult={ct_mult} realSize={real_size} markPx={mark_px}')
-
         positions.append({
             'inst':      p.get('instId', ''),
             'side':      p.get('posSide', ''),
@@ -408,10 +396,8 @@ def get_positions():
             'lever':     p.get('lever', ''),
         })
     summary = ' / '.join([
-        '{} {}'.format(
-            p['inst'].replace('-USDT-SWAP', ''),
-            'LONG' if p['side'] == 'long' else 'SHORT'
-        ) for p in positions
+        '{} {}'.format(p['inst'].replace('-USDT-SWAP',''), 'LONG' if p['side']=='long' else 'SHORT')
+        for p in positions
     ]) if positions else 'NONE'
     return jsonify({'ok': True, 'positions': positions, 'summary': summary})
 
