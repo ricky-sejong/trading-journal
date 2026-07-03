@@ -22,10 +22,9 @@ KST = ZoneInfo('Asia/Seoul')
 # ── DB ──────────────────────────────────────────────────
 def get_db():
     url = os.environ.get('DATABASE_URL', '')
-    # Session pooler는 pgbouncer=true 필요
-    if 'pooler.supabase.com' in url and 'pgbouncer' not in url:
-        url += '?pgbouncer=true' if '?' not in url else '&pgbouncer=true'
-    return psycopg2.connect(url, sslmode='require')
+    # pgbouncer 파라미터 제거 (psycopg2 미지원)
+    url = url.split('?')[0]
+    return psycopg2.connect(url, sslmode='require', connect_timeout=10)
 
 def init_db():
     try:
