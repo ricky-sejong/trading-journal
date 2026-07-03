@@ -82,7 +82,7 @@ def save_state(state):
 # ─── OKX REST 클라이언트 ─────────────────────────────────
 class OKXClient:
     BASE = "https://www.okx.com"
-    BOT_TAG = "GUARDIAN_BOT"
+    BOT_TAG = "GUARDIANBOT"
 
     def __init__(self, cfg):
         self.key = cfg["api_key"]
