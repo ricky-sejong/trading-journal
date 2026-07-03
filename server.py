@@ -286,20 +286,19 @@ def fetch_pnl_by_ordid(date_str):
     pnl_map = {}
     debug_count = 0
     for b in bills_r.get('data', []):
-        if b.get('type') != '8':  # 8 = 실현손익
-            continue
-        if debug_count < 5:
-            print(f'[bills-pnl-raw] type=8 항목: ordId={b.get("ordId")!r} pnl={b.get("pnl")!r} '
-                  f'billId={b.get("billId")!r} instId={b.get("instId")!r} subType={b.get("subType")!r} '
-                  f'전체키={list(b.keys())}')
-            debug_count += 1
         oid = b.get('ordId', '')
         if not oid:
-            continue
+            continue  # 펀딩비 등 ordId 없는 항목은 자동 제외
         try:
             pnl_val = float(b.get('pnl', 0) or 0)
         except (ValueError, TypeError):
             continue
+        if pnl_val == 0:
+            continue
+        if debug_count < 5:
+            print(f'[bills-pnl-raw] ordId={oid!r} pnl={pnl_val} type={b.get("type")!r} '
+                  f'subType={b.get("subType")!r} instId={b.get("instId")!r}')
+            debug_count += 1
         pnl_map[oid] = pnl_map.get(oid, 0) + pnl_val
 
     print(f'[bills-pnl] {date_str} ordId별 실현손익 {len(pnl_map)}건 매핑')
