@@ -223,11 +223,12 @@ class OKXClient:
                 break
 
         body = {
-            "instId": inst_id,
-            "tdMode": td_mode,
-            "side": "sell" if pos_side == "long" else "buy",  # 필수: 청산 방향
-            "posSide": pos_side,
-            "ordType": "conditional"
+            "instId":        inst_id,
+            "tdMode":        td_mode,
+            "side":          "sell" if pos_side == "long" else "buy",  # 필수: 청산 방향
+            "posSide":       pos_side,
+            "ordType":       "conditional",
+            "closeFraction": "1",   # 전량 청산
         }
 
         if sl_price is not None:
