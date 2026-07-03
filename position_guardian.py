@@ -200,23 +200,19 @@ class OKXClient:
     def get_existing_tpsl(self, inst_id, pos_side):
         """
         해당 포지션에 이미 설정된 TP/SL 알고 주문 조회.
-        conditional 외 다양한 ordType을 순회 조회 (posSide 필터는 완화 — 값이 없거나
-        다르게 오는 경우가 있어 못 찾는 문제를 방지).
+        ordType 생략 시 OKX가 모든 타입을 한 번에 반환하므로 API 호출 1회로 처리.
+        posSide 필터는 완화(비어있거나 다르게 오는 경우 허용).
         반환: {'has_sl': bool, 'has_tp': bool, 'sl_price': float|None, 'tp_price': float|None, 'algo_id': str|None}
         """
         has_sl = False; has_tp = False
         sl_price = None; tp_price = None; algo_id = None
 
-        for ord_type in ("conditional", "oco", "trigger", "move_order_stop"):
-            d = self._req("GET", "/api/v5/trade/orders-algo-pending", {
-                "instType": "SWAP",
-                "instId":   inst_id,
-                "ordType":  ord_type,
-            })
-            if d.get("code") != "0":
-                continue
+        d = self._req("GET", "/api/v5/trade/orders-algo-pending", {
+            "instType": "SWAP",
+            "instId":   inst_id,
+        })
+        if d.get("code") == "0":
             for o in d.get("data", []):
-                # posSide가 일치하거나, 비어있거나(net 모드 등) 아예 없는 경우도 허용
                 o_pos_side = o.get("posSide", "")
                 if o_pos_side and o_pos_side != pos_side:
                     continue
@@ -230,33 +226,26 @@ class OKXClient:
                     tp_price = float(tp)
                 if sl or tp:
                     algo_id = o.get("algoId")
-            if algo_id:
-                break  # 찾았으면 더 조회할 필요 없음
 
         return {"has_sl": has_sl, "has_tp": has_tp,
                 "sl_price": sl_price, "tp_price": tp_price, "algo_id": algo_id}
+
     def get_all_algo_ids(self, inst_id):
         """
         해당 심볼의 모든 pending algo 주문 ID 목록 조회.
-        conditional 외에도 oco, trigger, move_order_stop 등 다양한 타입이 있을 수 있어
-        ordType 여러 개를 순회하며 조회한다.
+        ordType 파라미터를 생략하면 OKX가 모든 타입을 한 번에 반환한다.
         """
+        d = self._req("GET", "/api/v5/trade/orders-algo-pending", {
+            "instType": "SWAP",
+            "instId":   inst_id,
+        })
+        log.info(f"orders-algo-pending 응답: code={d.get('code')} 건수={len(d.get('data', []))}")
         ids = []
-        seen = set()
-        for ord_type in ("conditional", "oco", "trigger", "move_order_stop"):
-            d = self._req("GET", "/api/v5/trade/orders-algo-pending", {
-                "instType": "SWAP",
-                "instId":   inst_id,
-                "ordType":  ord_type,
-            })
-            log.info(f"orders-algo-pending(ordType={ord_type}) 응답: code={d.get('code')} "
-                     f"건수={len(d.get('data', []))} raw={json.dumps(d, ensure_ascii=False)[:300]}")
-            if d.get("code") == "0":
-                for o in d.get("data", []):
-                    aid = o.get("algoId")
-                    if aid and aid not in seen:
-                        ids.append(aid)
-                        seen.add(aid)
+        if d.get("code") == "0":
+            for o in d.get("data", []):
+                aid = o.get("algoId")
+                if aid and aid not in ids:
+                    ids.append(aid)
         return ids
 
     def amend_tpsl(self, algo_id, inst_id, sl_price=None, tp_price=None):
