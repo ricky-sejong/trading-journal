@@ -223,10 +223,13 @@ def auto_sync_date(date_str):
 def backfill(days=7):
     try:
         existing = {d['date'] for d in db_load_journal()}
-        today = today_kst()
-        for i in range(1, days+1):
+        for i in range(0, days+1):
             d = (datetime.datetime.now(tz=KST) - datetime.timedelta(days=i)).strftime('%Y-%m-%d')
-            if d not in existing and d != today:
+            if d not in existing:
+                auto_sync_date(d)
+                time.sleep(0.5)
+            elif d == today_kst():
+                # 오늘은 항상 최신으로 갱신
                 auto_sync_date(d)
                 time.sleep(0.5)
     except Exception as e:
@@ -236,6 +239,11 @@ def midnight_job():
     print(f'[scheduler] 자정 자동 저장: {yesterday_kst()}')
     auto_sync_date(yesterday_kst())
 
+def today_job():
+    """오늘 데이터 30분마다 갱신"""
+    print(f'[scheduler] 오늘 데이터 갱신: {today_kst()}')
+    auto_sync_date(today_kst())
+
 # ── 초기화 (순서 중요: DB 먼저, 그 다음 스케줄러) ──────────
 db_ok = init_db()
 
@@ -244,10 +252,11 @@ if db_ok:
     try:
         scheduler = BackgroundScheduler(timezone=KST)
         scheduler.add_job(midnight_job, 'cron', hour=0, minute=1)
+        scheduler.add_job(today_job, 'interval', minutes=30)  # 30분마다 오늘 데이터 갱신
         scheduler.start()
         # 서버 완전 기동 후 백필 (10초 대기)
         threading.Thread(target=lambda: (time.sleep(10), backfill(7)), daemon=True).start()
-        print('[scheduler] 스케줄러 시작 완료')
+        print('[scheduler] 스케줄러 시작 완료 (자정 저장 + 30분 갱신)')
     except Exception as e:
         print(f'[scheduler] 시작 실패: {e}')
 else:
@@ -399,6 +408,34 @@ def get_positions():
         for p in positions
     ]) if positions else 'NONE'
     return jsonify({'ok': True, 'positions': positions, 'summary': summary})
+
+@app.route('/api/guardian/positions', methods=['GET'])
+def guardian_positions_get():
+    """포지션별 Guardian 설정 조회"""
+    try:
+        import position_guardian as pg
+        cfg = getattr(pg, 'guardian_pos_config', {})
+        return jsonify({'ok': True, 'config': cfg})
+    except Exception as e:
+        return jsonify({'ok': False, 'config': {}, 'msg': str(e)})
+
+@app.route('/api/guardian/positions', methods=['POST'])
+def guardian_positions_set():
+    """포지션별 Guardian ON/OFF 설정
+    body: {"pos_key": "BTC-USDT-SWAP-long", "enabled": true/false}
+    """
+    try:
+        import position_guardian as pg
+        body = request.json or {}
+        pos_key = body.get('pos_key', '')
+        enabled = bool(body.get('enabled', True))
+        if not hasattr(pg, 'guardian_pos_config'):
+            pg.guardian_pos_config = {}
+        pg.guardian_pos_config[pos_key] = enabled
+        print(f'[Guardian] {pos_key} → {"ON" if enabled else "OFF"}')
+        return jsonify({'ok': True, 'pos_key': pos_key, 'enabled': enabled})
+    except Exception as e:
+        return jsonify({'ok': False, 'msg': str(e)})
 
 @app.route('/api/guardian/status')
 def guardian_status():
