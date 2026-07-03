@@ -226,6 +226,24 @@ class OKXClient:
         return {"has_sl": has_sl, "has_tp": has_tp,
                 "sl_price": sl_price, "tp_price": tp_price, "algo_id": algo_id}
 
+    def get_all_algo_ids(self, inst_id):
+        """
+        해당 심볼의 모든 pending 조건부(algo) 주문 ID 목록 조회 (posSide 필터 없음).
+        posSide 불일치로 취소가 안 되는 문제 방지용.
+        """
+        d = self._req("GET", "/api/v5/trade/orders-algo-pending", {
+            "instType": "SWAP",
+            "instId":   inst_id,
+            "ordType":  "conditional",
+        })
+        ids = []
+        if d.get("code") == "0":
+            for o in d.get("data", []):
+                aid = o.get("algoId")
+                if aid:
+                    ids.append(aid)
+        return ids
+
     def amend_tpsl(self, algo_id, inst_id, sl_price=None, tp_price=None):
         """
         기존 알고 주문 수정 (amend-algo-order).
@@ -295,19 +313,25 @@ class OKXClient:
         log.info(f"신규 TP/SL 요청: {json.dumps(body, ensure_ascii=False)}")
         res = self._req("POST", "/api/v5/trade/order-algo", body=body)
 
-        # 그래도 "1개만 허용" 에러가 나면, 해당 포지션의 모든 조건부 주문을 조회해 취소 후 재시도
+        # 그래도 "1개만 허용" 에러가 나면, posSide 매칭 없이 해당 심볼의 모든 알고 주문을 취소 후 재시도
         if res.get("code") != "0":
             try:
                 sub_err = res.get("data", [{}])[0].get("sCode")
             except (IndexError, AttributeError, TypeError):
                 sub_err = None
             if sub_err == "51088":
-                log.warning("포지션당 TP/SL 1개 제한 재확인 — 전체 조회 후 취소 재시도")
-                existing = self.get_existing_tpsl(inst_id, pos_side)
-                found_id = existing.get("algo_id")
-                if found_id:
-                    self.cancel_algo(inst_id, found_id)
+                log.warning("포지션당 TP/SL 1개 제한 — 심볼 전체 알고주문 조회 후 취소 재시도")
+                all_ids = self.get_all_algo_ids(inst_id)
+                if all_ids:
+                    log.warning(f"발견된 알고주문 {len(all_ids)}개 전부 취소: {all_ids}")
+                    for aid in all_ids:
+                        self.cancel_algo(inst_id, aid)
+                    time.sleep(0.3)  # 취소 반영 대기
                     res = self._req("POST", "/api/v5/trade/order-algo", body=body)
+                    if res.get("code") != "0":
+                        log.warning(f"재시도 후에도 실패: {res.get('msg')} | {json.dumps(res, ensure_ascii=False)}")
+                else:
+                    log.warning("취소할 알고주문을 찾지 못함 — OKX 응답 지연 가능성")
 
         return res
 
