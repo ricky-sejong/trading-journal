@@ -266,6 +266,39 @@ def fetch_day_balances(date_str):
     print(f'[bills] {date_str} 거래 {len(trading_bills)}건 | 시작:{open_bal} → 마감:{close_bal}')
     return open_bal, close_bal
 
+def fetch_pnl_by_ordid(date_str):
+    """
+    OKX bills API에서 실현손익(type=8) 항목을 ordId 기준으로 매핑.
+    fills-history의 pnl 필드가 비어있는 경우의 대체 데이터 소스.
+    반환: {ordId: pnl_float}
+    """
+    start_ms = date_to_ms_kst(date_str, end=False)
+    end_ms   = date_to_ms_kst(date_str, end=True)
+
+    bills_r = okx_request('/api/v5/account/bills-archive', {
+        'ccy': 'USDT', 'begin': str(start_ms), 'end': str(end_ms), 'limit': '100'
+    })
+    if bills_r.get('code') != '0' or not bills_r.get('data'):
+        bills_r = okx_request('/api/v5/account/bills', {
+            'ccy': 'USDT', 'begin': str(start_ms), 'end': str(end_ms), 'limit': '100'
+        })
+
+    pnl_map = {}
+    for b in bills_r.get('data', []):
+        if b.get('type') != '8':  # 8 = 실현손익
+            continue
+        oid = b.get('ordId', '')
+        if not oid:
+            continue
+        try:
+            pnl_val = float(b.get('pnl', 0) or 0)
+        except (ValueError, TypeError):
+            continue
+        pnl_map[oid] = pnl_map.get(oid, 0) + pnl_val
+
+    print(f'[bills-pnl] {date_str} ordId별 실현손익 {len(pnl_map)}건 매핑')
+    return pnl_map
+
 def fetch_okx_daily(date_str):
     start_ms = date_to_ms_kst(date_str, end=False)
     end_ms   = date_to_ms_kst(date_str, end=True)
@@ -280,22 +313,22 @@ def fetch_okx_daily(date_str):
 
     total_pnl, total_fee = 0.0, 0.0
 
-    # 디버깅: 원본 체결 데이터 첫 5개 그대로 출력 (필드명 확인용)
-    for i, f in enumerate(fills.get('data', [])[:5]):
-        print(f'[fills-raw-debug] #{i}: pnl={f.get("pnl")!r} fillSz={f.get("fillSz")!r} '
-              f'sz={f.get("sz")!r} side={f.get("side")} posSide={f.get("posSide")} '
-              f'fillPx={f.get("fillPx")!r} subType={f.get("subType")}')
+    # fills-history의 pnl 필드가 비어있는 계좌/상품이 있어 bills 기준 실현손익을 보조로 사용
+    bills_pnl_map = fetch_pnl_by_ordid(date_str)
 
     # ordId 기준으로 체결 묶기
     order_map = {}
     for f in fills.get('data', []):
         oid = f.get('ordId') or f.get('tradeId', str(time.time()))
-        pnl = float(f.get('pnl', 0) or 0)
+        fills_pnl = f.get('pnl')
+        # fills의 pnl이 없거나(None) 0이면 bills 매핑값으로 대체
+        if fills_pnl is None or float(fills_pnl or 0) == 0:
+            pnl = bills_pnl_map.get(oid, 0.0)
+        else:
+            pnl = float(fills_pnl)
         fee = float(f.get('fee', 0) or 0)
         sz  = float(f.get('fillSz', 0) or 0)   # OKX fills-history는 'fillSz' 필드 사용 (sz 아님)
         px  = float(f.get('fillPx', 0) or 0)
-        if pnl != 0:
-            print(f'[fills-pnl-debug] ordId={oid} pnl={pnl} side={f.get("side")} posSide={f.get("posSide")}')
         total_pnl += pnl
         total_fee += fee
         if oid not in order_map:
