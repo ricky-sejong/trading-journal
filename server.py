@@ -326,15 +326,11 @@ def fetch_okx_daily(date_str):
     for f in fills.get('data', []):
         oid = f.get('ordId') or f.get('tradeId', str(time.time()))
         fills_pnl = f.get('pnl')
-        # fills의 pnl이 없거나(None) 0이면 bills 매핑값으로 대체
-        if fills_pnl is None or float(fills_pnl or 0) == 0:
-            pnl = bills_pnl_map.get(oid, 0.0)
-        else:
-            pnl = float(fills_pnl)
+        # fills 자체 pnl만 우선 사용 (bills 값은 아래에서 주문 단위로 한 번만 적용)
+        pnl = float(fills_pnl) if fills_pnl is not None else 0.0
         fee = float(f.get('fee', 0) or 0)
         sz  = float(f.get('fillSz', 0) or 0)   # OKX fills-history는 'fillSz' 필드 사용 (sz 아님)
         px  = float(f.get('fillPx', 0) or 0)
-        total_pnl += pnl
         total_fee += fee
         if oid not in order_map:
             order_map[oid] = {
@@ -350,6 +346,13 @@ def fetch_okx_daily(date_str):
             if total_sz > 0:
                 o['price'] = (o['price'] * o['sz'] + px * sz) / total_sz
             o['sz'] += sz; o['pnl'] += pnl; o['fee'] += fee; o['fills_count'] += 1
+
+    # 주문(ordId) 단위로 bills 손익을 "한 번만" 덮어쓰기 (fills pnl이 비어있는 경우에만)
+    for oid, o in order_map.items():
+        if o['pnl'] == 0 and oid in bills_pnl_map:
+            o['pnl'] = bills_pnl_map[oid]
+
+    total_pnl = sum(o['pnl'] for o in order_map.values())
 
     orders = sorted(order_map.values(), key=lambda x: x['time'])
     trade_count = len(orders)

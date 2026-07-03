@@ -669,7 +669,7 @@ function refreshToday(){
             var sc=p.pos_side==='long'?'long':'short';
             var typeLabel=p.type==='scalp'?'SCALP':'SWING ←';
             var typColor=p.type==='scalp'?'var(--muted2)':'var(--yellow)';
-            var pnlStr=p.pnl!==undefined?(p.pnl>=0?'+':'')+p.pnl.toFixed(2)+' U':'—';
+            var pnlStr=p.pnl!==undefined?(p.pnl>=0?'+':'')+p.pnl.toFixed(2):'—';
             var openPx=p.open_price?p.open_price.toLocaleString():'이전날';
             var timeRange=(p.open_time||'—')+' → '+(p.close_time||'—')+' '+calcDuration(p.open_time,p.close_time);
             return '<div class="trade-row" style="background:rgba(255,255,255,.02);margin:2px 0;border-radius:3px">'+
@@ -928,7 +928,7 @@ function openDayModal(id){
           '<span class="t-inst">'+p.inst+'</span>'+
           '<span style="font-family:var(--mono);font-size:10px;color:var(--muted2)">'+openPx+'→'+p.close_price.toLocaleString()+'</span>'+
           '<span style="font-family:var(--mono);font-size:10px;color:'+tc+';margin-left:6px">'+typeLabel+'</span>'+
-          '<span class="t-pnl" style="color:'+clr(p.pnl)+';margin-left:auto">'+(p.pnl>=0?'+':'')+p.pnl.toFixed(2)+' U</span>'+
+          '<span class="t-pnl" style="color:'+clr(p.pnl)+';margin-left:auto">'+(p.pnl>=0?'+':'')+p.pnl.toFixed(2)+'</span>'+
         '</div>';
       }).join('')+'</div>';
   }
@@ -949,25 +949,8 @@ function openDayModal(id){
       }).join('')+'</div>';
   }
 
-  // 전체 주문
-  if(entry.trades&&entry.trades.length){
-    th+='<div class="trade-section-title">ALL ORDERS ('+entry.trades.length+')</div>'+
-      '<div style="background:var(--bg3);border:1px solid var(--border);max-height:180px;overflow-y:auto">'+
-      entry.trades.map(function(t){
-        var sc=t.pos_side==='long'?'long':'short';
-        var isOpen=(sc==='long'&&t.side==='buy')||(sc==='short'&&t.side==='sell');
-        var fillsStr=t.fills>1?' ('+t.fills+'체결)':'';
-        return '<div class="trade-row">'+
-          '<span class="t-time">'+t.time+'</span>'+
-          '<span class="t-inst">'+t.inst+'</span>'+
-          '<span class="t-side '+sc+'">'+(sc==='long'?'LONG':'SHORT')+'</span>'+
-          '<span style="font-family:var(--mono);font-size:10px;color:'+(isOpen?'var(--green)':'var(--red)')+'">'+
-            (isOpen?'진입':'청산')+fillsStr+'</span>'+
-          '<span class="t-detail">'+t.sz+' @ '+parseFloat(t.price).toLocaleString()+'</span>'+
-          '<span class="t-pnl" style="color:'+clr(t.pnl)+';margin-left:auto">'+(t.pnl>=0?'+':'')+parseFloat(t.pnl).toFixed(2)+'</span>'+
-        '</div>';
-      }).join('')+'</div>';
-  } else if(!pairs.length && !swings.length){
+  // ALL ORDERS 대신 POSITIONS/SWING만 표시 — 둘 다 없을 때만 폴백
+  if(!pairs.length && !swings.length){
     var extra='';
     if(entry.pos)extra+='<div class="trade-section-title">SWING POSITION</div><div style="font-family:var(--mono);font-size:12px;color:var(--text2);background:var(--bg3);border:1px solid var(--border);padding:10px 12px">'+entry.pos+'</div>';
     if(entry.memo)extra+='<div class="trade-section-title" style="margin-top:8px">MEMO</div><div style="font-family:var(--mono);font-size:11px;color:var(--muted2);background:var(--bg3);border:1px solid var(--border);padding:10px 12px">'+entry.memo+'</div>';
