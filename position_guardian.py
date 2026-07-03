@@ -967,6 +967,7 @@ class PositionGuardian:
             # ── 포지션별 ON/OFF 체크 ──
             # 기본값은 True (설정 없으면 활성)
             pos_enabled = guardian_pos_config.get(pos_key, True)
+            log.info(f"  [설정체크] {pos_key} → enabled={pos_enabled} (전체설정: {guardian_pos_config})")
             if not pos_enabled:
                 log.info(f"  ⏸️  {symbol} {side.upper()}: Guardian OFF (사용자 설정) — 건너뜀")
                 # 스냅샷엔 포함 (모니터링은 유지)

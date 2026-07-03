@@ -77,6 +77,18 @@ def db_set_setting(key, value):
             """, (key, str(value)))
         conn.commit()
 
+def db_get_settings_by_prefix(prefix):
+    """prefix로 시작하는 모든 설정 조회 → {key(prefix 제거): value} 딕셔너리"""
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT key, value FROM settings WHERE key LIKE %s", (prefix + '%',))
+                rows = cur.fetchall()
+        return {k[len(prefix):]: v for k, v in rows}
+    except Exception as e:
+        print(f'[DB] prefix 조회 실패: {e}')
+        return {}
+
 def db_load_journal():
     with get_db() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -427,6 +439,17 @@ else:
 def run_guardian():
     try:
         from position_guardian import PositionGuardian, load_config as guardian_cfg
+        import position_guardian as pg
+
+        # DB에 저장된 포지션별 ON/OFF 설정 복원 (재배포 대응)
+        try:
+            saved = db_get_settings_by_prefix('guardian_pos:')
+            pg.guardian_pos_config = {k: (v == 'true') for k, v in saved.items()}
+            print(f'[Guardian] DB에서 포지션 설정 복원: {pg.guardian_pos_config}')
+        except Exception as e:
+            print(f'[Guardian] 설정 복원 실패 (기본값 사용): {e}')
+            pg.guardian_pos_config = {}
+
         print('[Guardian] OKX Position Guardian 시작...')
         PositionGuardian(guardian_cfg()).run()
     except ImportError:
@@ -610,17 +633,18 @@ def get_positions():
 
 @app.route('/api/guardian/positions', methods=['GET'])
 def guardian_positions_get():
-    """포지션별 Guardian 설정 조회"""
+    """포지션별 Guardian 설정 조회 (모듈 메모리 기준)"""
     try:
         import position_guardian as pg
         cfg = getattr(pg, 'guardian_pos_config', {})
+        print(f'[Guardian] 설정 조회: {cfg}')
         return jsonify({'ok': True, 'config': cfg})
     except Exception as e:
         return jsonify({'ok': False, 'config': {}, 'msg': str(e)})
 
 @app.route('/api/guardian/positions', methods=['POST'])
 def guardian_positions_set():
-    """포지션별 Guardian ON/OFF 설정
+    """포지션별 Guardian ON/OFF 설정 (모듈 메모리 + DB 영속 저장)
     body: {"pos_key": "BTC-USDT-SWAP-long", "enabled": true/false}
     """
     try:
@@ -628,11 +652,22 @@ def guardian_positions_set():
         body = request.json or {}
         pos_key = body.get('pos_key', '')
         enabled = bool(body.get('enabled', True))
-        if not hasattr(pg, 'guardian_pos_config'):
+        if not pos_key:
+            return jsonify({'ok': False, 'msg': 'pos_key가 없습니다.'}), 400
+
+        if not hasattr(pg, 'guardian_pos_config') or pg.guardian_pos_config is None:
             pg.guardian_pos_config = {}
         pg.guardian_pos_config[pos_key] = enabled
-        print(f'[Guardian] {pos_key} → {"ON" if enabled else "OFF"}')
-        return jsonify({'ok': True, 'pos_key': pos_key, 'enabled': enabled})
+
+        # DB에도 영속 저장 (재배포/재시작에도 유지)
+        try:
+            db_set_setting(f'guardian_pos:{pos_key}', 'true' if enabled else 'false')
+        except Exception as db_e:
+            print(f'[Guardian] DB 저장 실패 (메모리는 반영됨): {db_e}')
+
+        print(f'[Guardian] {pos_key} → {"ON" if enabled else "OFF"} | 현재 전체설정: {pg.guardian_pos_config}')
+        return jsonify({'ok': True, 'pos_key': pos_key, 'enabled': enabled,
+                         'current_config': pg.guardian_pos_config})
     except Exception as e:
         return jsonify({'ok': False, 'msg': str(e)})
 
