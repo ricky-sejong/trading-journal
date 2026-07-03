@@ -14,15 +14,22 @@ Bitget 버전을 OKX API v5 기준으로 완전 변환.
   OKX_API_KEY, OKX_SECRET_KEY, OKX_PASSPHRASE
 """
 
-import os, json, time, hmac, hashlib, base64, logging, datetime, math
+import os, json, time, hmac, hashlib, base64, logging, datetime, math, sys
 import urllib.request, urllib.parse, urllib.error
 from pathlib import Path
+
+# stdout 버퍼링 비활성화 (Render 로그 지연 방지)
+try:
+    sys.stdout.reconfigure(line_buffering=True)
+except Exception:
+    pass
 
 # ─── 로깅 ───────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[logging.StreamHandler()],
+    handlers=[logging.StreamHandler(sys.stdout)],
+    force=True,
 )
 log = logging.getLogger("Guardian")
 
@@ -227,18 +234,29 @@ class OKXClient:
         log.info(f"AMEND 요청: algoId={algo_id} SL={sl_price} TP={tp_price}")
         return self._req("POST", "/api/v5/trade/amend-algos", body=body)
 
+    def cancel_algo(self, inst_id, algo_id):
+        """알고 주문 취소"""
+        body = [{"instId": inst_id, "algoId": algo_id}]
+        log.info(f"기존 알고주문 취소: algoId={algo_id}")
+        return self._req("POST", "/api/v5/trade/cancel-algos", body=body)
+
     def set_tpsl(self, inst_id, pos_side, sl_price=None, tp_price=None, algo_id=None):
         """
         TP/SL 설정.
-        - algo_id 있으면 → amend-algo-order (안전, SL 공백 없음)
-        - algo_id 없으면 → order-algo (신규 생성)
+        - algo_id 있으면 → amend-algos (안전, SL 공백 없음)
+        - amend 실패 시 → 기존 주문 취소 후 신규 생성
+          (OKX는 포지션당 TP/SL 알고 주문 1개만 허용하므로 취소 없이 신규 생성 불가)
         """
         # 기존 주문 수정 (권장)
         if algo_id:
             res = self.amend_tpsl(algo_id, inst_id, sl_price=sl_price, tp_price=tp_price)
             if res.get("code") == "0":
                 return res
-            log.warning(f"amend 실패 ({res.get('msg')}) → 신규 주문으로 폴백")
+            log.warning(f"amend 실패 ({res.get('msg')}) → 기존 주문 취소 후 재생성")
+            # amend 실패 시 기존 주문 취소 (포지션당 1개 제한 때문에 필수)
+            cancel_res = self.cancel_algo(inst_id, algo_id)
+            if cancel_res.get("code") != "0":
+                log.warning(f"기존 주문 취소 실패: {cancel_res.get('msg')} — 그래도 신규 생성 시도")
 
         # 신규 주문 생성
         pos = self.get_all_positions()
@@ -266,7 +284,23 @@ class OKXClient:
             body["tpTriggerPxType"] = "mark"
 
         log.info(f"신규 TP/SL 요청: {json.dumps(body, ensure_ascii=False)}")
-        return self._req("POST", "/api/v5/trade/order-algo", body=body)
+        res = self._req("POST", "/api/v5/trade/order-algo", body=body)
+
+        # 그래도 "1개만 허용" 에러가 나면, 해당 포지션의 모든 조건부 주문을 조회해 취소 후 재시도
+        if res.get("code") != "0":
+            try:
+                sub_err = res.get("data", [{}])[0].get("sCode")
+            except (IndexError, AttributeError, TypeError):
+                sub_err = None
+            if sub_err == "51088":
+                log.warning("포지션당 TP/SL 1개 제한 재확인 — 전체 조회 후 취소 재시도")
+                existing = self.get_existing_tpsl(inst_id, pos_side)
+                found_id = existing.get("algo_id")
+                if found_id:
+                    self.cancel_algo(inst_id, found_id)
+                    res = self._req("POST", "/api/v5/trade/order-algo", body=body)
+
+        return res
 
     def get_klines(self, inst_id, bar, limit):
         """
