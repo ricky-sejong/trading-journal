@@ -314,6 +314,18 @@ body{font-family:var(--sans);background:var(--bg);color:var(--text);min-height:1
       <span class="panel-title">LIVE TRADES</span>
       <span class="panel-sub" id="live-sync-time"></span>
     </div>
+
+    <!-- Guardian 컨트롤 -->
+    <div style="background:var(--bg2);border:1px solid var(--border);border-radius:2px;padding:12px 16px;margin-bottom:16px;display:flex;align-items:center;gap:16px;flex-wrap:wrap">
+      <div style="display:flex;align-items:center;gap:8px">
+        <div class="conn-dot" id="guardian-dot"></div>
+        <span style="font-family:var(--mono);font-size:11px;color:var(--text2)" id="guardian-status">GUARDIAN 확인 중...</span>
+      </div>
+      <div style="display:flex;gap:6px;margin-left:auto;flex-wrap:wrap">
+        <button class="sm-btn" id="guardian-toggle-btn" onclick="toggleGuardian()">— —</button>
+        <button class="sm-btn" id="skip-sl-btn" onclick="toggleSkipSl()" title="ON: 기존 SL 있으면 건너뜀 / OFF: 항상 덮어씀">기존 SL 유지: —</button>
+      </div>
+    </div>
     <div class="live-grid">
       <div class="live-cell"><div class="live-label">TRADES TODAY</div><div class="live-val" id="l-cnt">—</div></div>
       <div class="live-cell"><div class="live-label">REALIZED PNL</div><div class="live-val" id="l-pnl">—</div></div>
@@ -542,11 +554,64 @@ function refreshPositions(){
     }).catch(function(){});
 }
 
+/* ── Guardian 제어 ── */
+var guardianSkipSl = true;
+
+function refreshGuardianStatus(){
+  fetch(SERVER+'/api/guardian/status',{signal:AbortSignal.timeout(5000)})
+    .then(function(r){return r.json();})
+    .then(function(d){
+      var dot=document.getElementById('guardian-dot');
+      var status=document.getElementById('guardian-status');
+      var btn=document.getElementById('guardian-toggle-btn');
+      var skipBtn=document.getElementById('skip-sl-btn');
+      if(d.running){
+        dot.className='conn-dot on';
+        status.textContent='GUARDIAN 활성 — 포지션 '+d.position_count+'개 감시 중';
+        btn.textContent='■ GUARDIAN 정지';
+        btn.style.color='var(--red)';
+        btn.style.borderColor='var(--red)';
+      } else {
+        dot.className='conn-dot off';
+        status.textContent='GUARDIAN 정지됨 — 자동 SL/TP 비활성';
+        btn.textContent='▶ GUARDIAN 시작';
+        btn.style.color='var(--green)';
+        btn.style.borderColor='var(--green)';
+      }
+      skipBtn.textContent='기존 SL 유지: '+(guardianSkipSl?'ON':'OFF');
+      skipBtn.style.color=guardianSkipSl?'var(--green)':'var(--muted2)';
+    }).catch(function(){
+      document.getElementById('guardian-dot').className='conn-dot off';
+      document.getElementById('guardian-status').textContent='GUARDIAN 연결 실패';
+    });
+}
+
+function toggleGuardian(){
+  var btn=document.getElementById('guardian-toggle-btn');
+  var isRunning=btn.textContent.indexOf('정지')>=0;
+  var url=SERVER+(isRunning?'/api/guardian/stop':'/api/guardian/start');
+  fetch(url,{method:'POST'})
+    .then(function(r){return r.json();})
+    .then(function(d){
+      if(d.ok)setTimeout(refreshGuardianStatus,300);
+    });
+}
+
+function toggleSkipSl(){
+  guardianSkipSl=!guardianSkipSl;
+  fetch(SERVER+'/api/guardian/config',{
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({skip_if_has_sl:guardianSkipSl})
+  }).then(function(){refreshGuardianStatus();});
+}
+
 function startAutoRefresh(){
   stopAutoRefresh();
-  refreshToday();refreshPositions();
+  refreshToday();refreshPositions();refreshGuardianStatus();
   todayTimer=setInterval(refreshToday,30000);
   posTimer=setInterval(refreshPositions,15000);
+  todayTimer=setInterval(refreshGuardianStatus,20000);
 }
 function stopAutoRefresh(){
   if(todayTimer)clearInterval(todayTimer);

@@ -53,9 +53,9 @@ DEFAULT_CONFIG = {
     "atr_min_pct":    0.3,
     "atr_max_pct":    3.0,
 
-    # 폴백 기본값
-    "default_sl_pct": 2.0,
-    "default_tp_pct": 6.0,
+    # TP 최소값 / RR 보장
+    "min_tp_pct":   0.5,    # 진입가 대비 최소 TP 거리 % (수수료 커버)
+    "min_rr":       1.5,    # 최소 리스크:리워드 비율 (SL거리 × min_rr 이상)
 
     # 안전장치
     "max_loss_pct_of_margin": 80,
@@ -139,6 +139,32 @@ class OKXClient:
             log.error(f"포지션 조회 실패: {d.get('msg')}")
             return []
         return [p for p in d.get("data", []) if float(p.get("pos", 0)) != 0]
+
+    def get_existing_tpsl(self, inst_id, pos_side):
+        """
+        해당 포지션에 이미 설정된 TP/SL 알고 주문 조회.
+        반환: {'has_sl': bool, 'has_tp': bool, 'sl_price': float|None, 'tp_price': float|None}
+        """
+        d = self._req("GET", "/api/v5/trade/orders-algo-pending", {
+            "instType": "SWAP",
+            "instId":   inst_id,
+            "ordType":  "conditional",
+        })
+        has_sl = False; has_tp = False
+        sl_price = None; tp_price = None
+        if d.get("code") == "0":
+            for o in d.get("data", []):
+                if o.get("posSide") != pos_side:
+                    continue
+                sl = o.get("slTriggerPx", "")
+                tp = o.get("tpTriggerPx", "")
+                if sl and float(sl) > 0:
+                    has_sl = True
+                    sl_price = float(sl)
+                if tp and float(tp) > 0:
+                    has_tp = True
+                    tp_price = float(tp)
+        return {"has_sl": has_sl, "has_tp": has_tp, "sl_price": sl_price, "tp_price": tp_price}
 
     def get_klines(self, inst_id, bar, limit):
         """
@@ -349,6 +375,10 @@ def analyze_chart_structure(opens, highs, lows, closes, side):
     }
 
 
+# ─── 가디언 전역 상태 (서버에서 제어) ──────────────────────
+guardian_running = True   # True = 활성, False = 일시정지
+guardian_instance = None  # 서버에서 참조용
+
 # ─── 포지션 가디언 ──────────────────────────────────────
 class PositionGuardian:
     def __init__(self, cfg):
@@ -356,6 +386,9 @@ class PositionGuardian:
         self.client = OKXClient(cfg)
         self.state  = load_state()
         self.dry    = cfg.get("dry_run", True)
+        # 기존 SL/TP가 있을 때 건너뛸지 여부 (설정으로 제어)
+        self.skip_if_has_sl = cfg.get("skip_if_has_sl", True)
+        self.skip_if_has_tp = cfg.get("skip_if_has_tp", False)  # TP는 기본적으로 덮어씀
 
     def _bar_to_okx(self, interval):
         """설정값 → OKX bar 파라미터 변환"""
@@ -468,16 +501,57 @@ class PositionGuardian:
                 new_sl = mark + min_gap
 
         st.update({
-            "current_sl":     new_sl,
-            "pnl_pct":        round(pnl_pct, 3),
-            "sl_dist_pct":    round(sl_dist_pct, 3),
+            "current_sl":      new_sl,
+            "pnl_pct":         round(pnl_pct, 3),
+            "sl_dist_pct":     round(sl_dist_pct, 3),
             "trailing_active": trailing_active,
-            "sl_source":      struct_source,
-            "tp_price":       struct.get("tp_price"),
-            "pattern":        struct.get("pattern"),
-            "sr_levels":      struct.get("sr_levels", []),
-            "last_update":    datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "sl_source":       struct_source,
+            "pattern":         struct.get("pattern"),
+            "sr_levels":       struct.get("sr_levels", []),
+            "last_update":     datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         })
+
+        # ── 4) TP 보정 — 최소 TP % + 최소 RR 보장 ──
+        raw_tp = struct.get("tp_price")
+        min_tp_pct = cfg.get("min_tp_pct", 0.5)
+        min_rr     = cfg.get("min_rr", 1.5)
+
+        if side == "long":
+            # 최소 TP 가격 (진입가 기준 0.5% 이상)
+            min_tp_by_pct = entry * (1 + min_tp_pct / 100)
+            # 최소 RR 보장 TP (SL 거리 × min_rr)
+            sl_dist_abs   = mark - new_sl
+            min_tp_by_rr  = mark + sl_dist_abs * min_rr
+            # 구조적 TP가 두 조건 모두 만족하면 그대로, 아니면 더 먼 값으로 보정
+            min_tp_floor  = max(min_tp_by_pct, min_tp_by_rr)
+            if raw_tp is None or raw_tp < min_tp_floor:
+                final_tp = min_tp_floor
+                tp_source = f"최소보장 TP (pct:{min_tp_pct}% / RR{min_rr}:1)"
+            else:
+                final_tp = raw_tp
+                tp_source = "구조적 TP"
+        else:
+            min_tp_by_pct = entry * (1 - min_tp_pct / 100)
+            sl_dist_abs   = new_sl - mark
+            min_tp_by_rr  = mark - sl_dist_abs * min_rr
+            min_tp_ceil   = min(min_tp_by_pct, min_tp_by_rr)
+            if raw_tp is None or raw_tp > min_tp_ceil:
+                final_tp = min_tp_ceil
+                tp_source = f"최소보장 TP (pct:{min_tp_pct}% / RR{min_rr}:1)"
+            else:
+                final_tp = raw_tp
+                tp_source = "구조적 TP"
+
+        # RR 실제값 계산 (로그용)
+        if side == "long":
+            actual_rr = (final_tp - mark) / (mark - new_sl) if mark - new_sl > 0 else 0
+        else:
+            actual_rr = (mark - final_tp) / (new_sl - mark) if new_sl - mark > 0 else 0
+
+        st["tp_price"]  = round(final_tp, 4)
+        st["tp_source"] = tp_source
+        st["actual_rr"] = round(actual_rr, 2)
+
         return new_sl, st
 
     def _check_emergency_exit(self, pos):
@@ -493,6 +567,13 @@ class PositionGuardian:
         return loss_pct >= self.cfg["max_loss_pct_of_margin"]
 
     def run_once(self):
+        global guardian_running
+
+        # 온/오프 체크
+        if not guardian_running:
+            log.info("[Guardian] 일시정지 상태 — 루프 건너뜀")
+            return
+
         positions = self._fetch_positions()
         ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -516,7 +597,7 @@ class PositionGuardian:
                 log.warning(f"  {inst_id}: 캔들 데이터 부족 — 건너뜀")
                 continue
 
-            # 긴급 손절 체크
+            # 긴급 손절 체크 (온/오프 상관없이 항상 실행)
             if self._check_emergency_exit(pos):
                 log.warning(f"  🚨 {inst_id} {side.upper()}: 마진 대비 손실 한도 초과 — 긴급 청산!")
                 if not self.dry:
@@ -524,6 +605,29 @@ class PositionGuardian:
                     log.warning(f"     긴급 청산 결과: {res}")
                 else:
                     log.warning("     [DRY-RUN] 긴급 청산 생략")
+                continue
+
+            # 기존 SL/TP 조회
+            existing = self.client.get_existing_tpsl(inst_id, side)
+            skip_sl = self.skip_if_has_sl and existing["has_sl"]
+            skip_tp = self.skip_if_has_tp and existing["has_tp"]
+
+            if skip_sl:
+                log.info(f"  ⏭️  {symbol} {side.upper()}: 기존 SL ${existing['sl_price']:,.4f} 감지 — SL 건너뜀")
+            if skip_tp:
+                log.info(f"  ⏭️  {symbol} {side.upper()}: 기존 TP ${existing['tp_price']:,.4f} 감지 — TP 건너뜀")
+
+            # 둘 다 건너뛰면 스냅샷만 찍고 SL 계산 생략
+            if skip_sl and skip_tp:
+                snapshot.append({
+                    "symbol": symbol, "inst_id": inst_id, "side": side,
+                    "sl": existing["sl_price"], "tp_price": existing["tp_price"],
+                    "sl_source": "사용자 설정 SL (유지 중)",
+                    "trailing_active": False, "sl_dist_pct": 0, "pnl_pct": 0,
+                    "leverage": pos.get("lever", "?"),
+                    "unrealized_pl": pos.get("upl"),
+                    "skipped": True,
+                })
                 continue
 
             new_sl, st = self._calc_dynamic_sl(pos, analysis, pos_key)
@@ -538,26 +642,32 @@ class PositionGuardian:
             dir_icon   = "🟢" if side=="long" else "🔴"
             trail_note = "🔄트레일링" if st["trailing_active"] else "📐구조기반"
             tp_str     = f"${st['tp_price']:,.4f}" if st.get("tp_price") else "—"
+            rr_str     = f"RR 1:{st.get('actual_rr', 0):.2f}"
             log.info(
                 f"  {dir_icon} {symbol} {side.upper()} {lever}x | "
                 f"진입:${entry:,.4f} | 현재:${mark:,.4f} | PnL:{st['pnl_pct']:+.2f}% | "
-                f"SL:${new_sl:,.4f} ({st['sl_dist_pct']:.2f}%) | TP:{tp_str} | {trail_note}"
+                f"SL:${new_sl:,.4f} ({st['sl_dist_pct']:.2f}%) | TP:{tp_str} | {rr_str} | {trail_note}"
             )
-            log.info(f"     근거: {st.get('sl_source','-')}")
+            log.info(f"     SL근거: {st.get('sl_source','-')}")
+            log.info(f"     TP근거: {st.get('tp_source','-')}")
             if st.get("pattern"):
                 log.info(f"     캔들패턴: {st['pattern']}")
 
-            # SL 갱신 (0.05% 이상 변할 때만 API 호출)
+            # SL 갱신 (0.05% 이상 변할 때만 API 호출, skip 플래그 반영)
             prev_sl = st.get("_last_applied_sl")
             should_update = prev_sl is None or abs(new_sl - prev_sl) / mark > 0.0005
 
             if should_update:
-                if not self.dry:
-                    res = self.client.set_tpsl(inst_id, side, sl_price=new_sl,
-                                               tp_price=st.get("tp_price"))
+                apply_sl = None if skip_sl else new_sl
+                apply_tp = None if skip_tp else st.get("tp_price")
+                if apply_sl is None and apply_tp is None:
+                    log.info(f"     → SL/TP 모두 사용자 설정 유지")
+                elif not self.dry:
+                    res = self.client.set_tpsl(inst_id, side,
+                                               sl_price=apply_sl, tp_price=apply_tp)
                     if res.get("code") == "0":
                         st["_last_applied_sl"] = new_sl
-                        log.info(f"     → SL 갱신 완료")
+                        log.info(f"     → SL 갱신 완료{' (TP 건너뜀)' if skip_tp else ''}")
                     else:
                         log.warning(f"     → SL 갱신 실패: {res.get('msg')}")
                 else:
@@ -588,12 +698,16 @@ class PositionGuardian:
         save_state(self.state)
 
     def run(self):
+        global guardian_instance
+        guardian_instance = self
+
         log.info("=" * 55)
         log.info(" OKX Position Guardian 시작 (차트 구조 분석 모드)")
         log.info(f" 감시 모드: {'전체 포지션' if self.cfg['watch_all_positions'] else self.cfg['watch_symbols']}")
         log.info(f" 트레일링: {self.cfg['trail_pct']}% (활성 임계 {self.cfg['trail_activate_pct']}%)")
         log.info(f" ATR 배수: {self.cfg['atr_multiplier']}x")
         log.info(f" 긴급청산: 마진대비 손실 {self.cfg['max_loss_pct_of_margin']}% 초과 시")
+        log.info(f" 기존SL유지: {self.skip_if_has_sl}")
         log.info(f" DRY-RUN: {self.cfg['dry_run']}")
         log.info("=" * 55)
 

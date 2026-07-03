@@ -401,6 +401,61 @@ def get_positions():
     ]) if positions else 'NONE'
     return jsonify({'ok': True, 'positions': positions, 'summary': summary})
 
+@app.route('/api/guardian/status')
+def guardian_status():
+    try:
+        from position_guardian import guardian_running, guardian_instance
+        state_path = 'guardian_state.json'
+        state = {}
+        if os.path.exists(state_path):
+            with open(state_path) as f:
+                state = json.load(f)
+        latest = state.get('latest', {})
+        return jsonify({
+            'ok': True,
+            'running': guardian_running,
+            'position_count': latest.get('position_count', 0),
+            'positions': latest.get('positions', []),
+            'last_update': latest.get('time', '—'),
+        })
+    except Exception as e:
+        return jsonify({'ok': False, 'running': False, 'msg': str(e)})
+
+@app.route('/api/guardian/start', methods=['POST'])
+def guardian_start():
+    try:
+        import position_guardian as pg
+        pg.guardian_running = True
+        print('[Guardian] 사용자가 Guardian 활성화')
+        return jsonify({'ok': True, 'running': True})
+    except Exception as e:
+        return jsonify({'ok': False, 'msg': str(e)})
+
+@app.route('/api/guardian/stop', methods=['POST'])
+def guardian_stop():
+    try:
+        import position_guardian as pg
+        pg.guardian_running = False
+        print('[Guardian] 사용자가 Guardian 일시정지')
+        return jsonify({'ok': True, 'running': False})
+    except Exception as e:
+        return jsonify({'ok': False, 'msg': str(e)})
+
+@app.route('/api/guardian/config', methods=['POST'])
+def guardian_config():
+    """Guardian 설정 변경 (skip_if_has_sl 등)"""
+    try:
+        import position_guardian as pg
+        body = request.json or {}
+        if pg.guardian_instance:
+            if 'skip_if_has_sl' in body:
+                pg.guardian_instance.skip_if_has_sl = bool(body['skip_if_has_sl'])
+            if 'skip_if_has_tp' in body:
+                pg.guardian_instance.skip_if_has_tp = bool(body['skip_if_has_tp'])
+        return jsonify({'ok': True})
+    except Exception as e:
+        return jsonify({'ok': False, 'msg': str(e)})
+
 if __name__ == '__main__':
     print('='*50)
     print(' OKX 매매일지 (Render + Supabase)')
