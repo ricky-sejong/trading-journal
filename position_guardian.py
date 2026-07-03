@@ -62,7 +62,7 @@ DEFAULT_CONFIG = {
     "min_sl_distance_pct":    0.2,
 
     "poll_interval_sec": 10,
-    "dry_run": FALSE,
+    "dry_run": False,
 }
 
 STATE_PATH = Path("guardian_state.json")
