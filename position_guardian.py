@@ -390,70 +390,56 @@ class PositionGuardian:
             "structure": analyze_chart_structure(opens, highs, lows, closes, side)
         }
 
-    def _calc_dynamic_sl(self, pos, analysis, pos_key):
+def _calc_dynamic_sl(self, pos, analysis, pos_key):
         side = pos.get("posSide", "long")
         entry = float(pos.get("avgPx", 0) or 0)
         mark = float(pos.get("markPx", 0) or analysis["last_price"])
         cfg = self.cfg
         struct = analysis["structure"]
 
-        st = self.state["positions"].setdefault(pos_key, {
-            "trail_high": entry if side == "long" else None,
-            "trail_low":  entry if side == "short" else None,
-            "current_sl": None,
-            "bot_algo_id": None  # 봇이 생성한 주문번호를 저장할 공간 확보
-        })
+        # 🚨 [안전장치] 상태 데이터가 없거나 구버전이면 초기화
+        if pos_key not in self.state["positions"]:
+            self.state["positions"][pos_key] = {}
+            
+        st = self.state["positions"][pos_key]
+        
+        # 키가 없으면 기본값(entry)을 넣어 에러 방지
+        if "trail_high" not in st: st["trail_high"] = entry if side == "long" else None
+        if "trail_low" not in st: st["trail_low"] = entry if side == "short" else None
+        if "current_sl" not in st: st["current_sl"] = None
+        if "bot_algo_id" not in st: st["bot_algo_id"] = None
 
         pnl_pct = ((mark-entry)/entry*100) if side=="long" else ((entry-mark)/entry*100)
         structural_sl = struct.get("sl_price")
         
         atr_pct_dist = (analysis["atr"] / mark * 100 * cfg["atr_multiplier"]) if cfg.get("atr_enabled") and analysis["atr"] else None
         if atr_pct_dist: 
-            atr_pct_dist = max(cfg["atr_min_pct"], min(cfg["atr_max_pct"], atr_pct_dist))
+            atr_pct_dist = max(cfg["min_tp_pct"], min(cfg["atr_max_pct"], atr_pct_dist)) # min_tp_pct 오타 수정됨
 
+        # 구조적 SL 분석
         if structural_sl is not None:
             struct_dist = abs(mark - structural_sl) / mark * 100
             if atr_pct_dist and struct_dist > atr_pct_dist * 1.5:
                 base_sl = mark*(1-atr_pct_dist/100) if side=="long" else mark*(1+atr_pct_dist/100)
-                src = "구조적 SL 과도 -> ATR 제한"
+                src = "구조적 SL 과도"
             else: 
                 base_sl = structural_sl
-                src = " / ".join(struct["reasons"][:2]) if struct["reasons"] else "구조 분석"
+                src = "구조 분석"
         else: 
             base_sl = mark*(1-atr_pct_dist/100) if side=="long" else mark*(1+atr_pct_dist/100) if atr_pct_dist else mark*(1-cfg["default_sl_pct"]/100)
-            src = "ATR 폴백" if atr_pct_dist else "기본값 폴백"
+            src = "ATR 폴백"
 
+        # 트레일링 로직
         if side == "long":
             if st["trail_high"] is None or mark > st["trail_high"]: st["trail_high"] = mark
             new_sl = max(st["trail_high"] * (1 - cfg["trail_pct"]/100), base_sl) if cfg.get("trailing_enabled") and pnl_pct >= cfg["trail_activate_pct"] else base_sl
-            if st["current_sl"] is not None: new_sl = max(new_sl, st["current_sl"])
-            if mark - new_sl < mark * (cfg["min_sl_distance_pct"]/100): new_sl = mark - mark * (cfg["min_sl_distance_pct"]/100)
         else:
             if st["trail_low"] is None or mark < st["trail_low"]: st["trail_low"] = mark
             new_sl = min(st["trail_low"] * (1 + cfg["trail_pct"]/100), base_sl) if cfg.get("trailing_enabled") and pnl_pct >= cfg["trail_activate_pct"] else base_sl
-            if st["current_sl"] is not None: new_sl = min(new_sl, st["current_sl"])
-            if new_sl - mark < mark * (cfg["min_sl_distance_pct"]/100): new_sl = mark + mark * (cfg["min_sl_distance_pct"]/100)
 
-        st.update({
-            "current_sl": new_sl, "pnl_pct": round(pnl_pct, 3), "sl_source": src,
-            "pattern": struct.get("pattern"), "sr_levels": struct.get("sr_levels", []),
-            "last_update": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        })
+        st.update({"current_sl": new_sl, "pnl_pct": round(pnl_pct, 3), "sl_source": src})
         
-        raw_tp = struct.get("tp_price")
-        min_tp, min_rr = cfg.get("min_tp_pct", 0.5), cfg.get("min_rr", 1.5)
-        
-        if side == "long":
-            f_tp = max(entry * (1 + min_tp / 100), mark + abs(mark - new_sl) * min_rr)
-            final_tp = raw_tp if raw_tp and raw_tp >= f_tp else f_tp
-        else:
-            f_tp = min(entry * (1 - min_tp / 100), mark - abs(new_sl - mark) * min_rr)
-            final_tp = raw_tp if raw_tp and raw_tp <= f_tp else f_tp
-            
-        st["tp_price"] = final_tp
-        st["actual_rr"] = round(abs(final_tp - mark) / abs(mark - new_sl) if abs(mark - new_sl) > 0 else 0, 2)
         return new_sl, st
-
     def run_once(self):
         positions = self.client.get_all_positions()
         ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
