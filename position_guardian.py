@@ -1008,14 +1008,29 @@ class PositionGuardian:
 
             # 기존 SL/TP 조회 (캐싱)
             existing = self._get_existing_tpsl_cached(inst_id, side)
-            skip_sl = self.skip_if_has_sl and existing["has_sl"]
-            skip_tp = self.skip_if_has_tp and existing["has_tp"]
-            algo_id = existing.get("algo_id")
+            algo_id  = existing.get("algo_id")
+
+            # 이 algoId가 Guardian이 이전에 직접 건 주문인지 확인
+            # (state에 저장해둔 algo_id와 일치하면 "내가 건 것" → 항상 갱신 대상)
+            prev_state = self.state["positions"].get(pos_key, {})
+            is_own_order = (
+                algo_id is not None and
+                prev_state.get("_own_algo_id") == algo_id
+            )
+
+            if is_own_order:
+                # Guardian이 건 주문 → skip 없이 항상 재계산/갱신
+                skip_sl = False
+                skip_tp = False
+            else:
+                # 사용자가 걸었거나 처음 보는 주문 → 설정에 따라 skip
+                skip_sl = self.skip_if_has_sl and existing["has_sl"]
+                skip_tp = self.skip_if_has_tp and existing["has_tp"]
 
             if skip_sl:
-                log.info(f"  ⏭️  {symbol} {side.upper()}: 기존 SL ${existing['sl_price']:,.4f} 감지 — SL 건너뜀")
+                log.info(f"  ⏭️  {symbol} {side.upper()}: 사용자 SL ${existing['sl_price']:,.4f} 감지 — SL 건너뜀")
             if skip_tp:
-                log.info(f"  ⏭️  {symbol} {side.upper()}: 기존 TP ${existing['tp_price']:,.4f} 감지 — TP 건너뜀")
+                log.info(f"  ⏭️  {symbol} {side.upper()}: 사용자 TP ${existing['tp_price']:,.4f} 감지 — TP 건너뜀")
 
             # 둘 다 건너뛰면 스냅샷만 찍고 SL 계산 생략
             if skip_sl and skip_tp:
@@ -1066,9 +1081,15 @@ class PositionGuardian:
                 if fibs:
                     log.info(f"     피보나치 확장: {fibs}")
 
-            # SL 갱신 (0.05% 이상 변할 때만 API 호출, skip 플래그 반영)
+            # SL/TP 갱신 판단: SL이 0.05% 이상 변하거나, TP가 새로 생기거나 변한 경우
             prev_sl = st.get("_last_applied_sl")
-            should_update = prev_sl is None or abs(new_sl - prev_sl) / mark > 0.0005
+            prev_tp = st.get("_last_applied_tp")
+            cur_tp  = st.get("tp_price")
+            sl_changed = prev_sl is None or abs(new_sl - prev_sl) / mark > 0.0005
+            tp_changed = (cur_tp is not None) and (
+                prev_tp is None or abs(cur_tp - prev_tp) / mark > 0.0005
+            )
+            should_update = sl_changed or tp_changed
 
             if should_update:
                 apply_sl = None if skip_sl else new_sl
@@ -1082,6 +1103,17 @@ class PositionGuardian:
                                                algo_id=algo_id)
                     if res.get("code") == "0":
                         st["_last_applied_sl"] = new_sl
+                        if apply_tp is not None:
+                            st["_last_applied_tp"] = apply_tp
+                        # 응답에서 algoId 추출 → 다음 루프에서 "내가 건 주문"으로 인식
+                        try:
+                            new_algo_id = res.get("data", [{}])[0].get("algoId")
+                            if new_algo_id:
+                                st["_own_algo_id"] = new_algo_id
+                            elif algo_id:
+                                st["_own_algo_id"] = algo_id  # amend 성공 시 기존 id 유지
+                        except (IndexError, AttributeError):
+                            pass
                         # 캐시 무효화 (주문 변경됨)
                         cache_key = f"{inst_id}-{side}"
                         self._algo_cache.pop(cache_key, None)
@@ -1090,6 +1122,8 @@ class PositionGuardian:
                         log.warning(f"     → SL 갱신 실패: {res.get('msg')}")
                 else:
                     st["_last_applied_sl"] = new_sl
+                    if apply_tp is not None:
+                        st["_last_applied_tp"] = apply_tp
                     log.info(f"     → [DRY-RUN] SL 갱신: ${new_sl:,.4f}")
 
             snapshot.append({
