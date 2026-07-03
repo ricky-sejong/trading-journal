@@ -1,9 +1,6 @@
 """
-OKX Position Guardian — 보유 포지션 자동 익절/손절 관리 (Amend 규격 완벽 수정본)
+OKX Position Guardian — 보유 포지션 자동 익절/손절 관리 (로컬 메모리 추적 버전)
 ================================================================
-버그 수정 내역:
-  - amend_tpsl(주문 수정) 호출 시 거래소가 거절하는 algoClOrdId 파라미터 제외 로직 추가
-  - 봇 주문 생성과 봇 주문 수정의 데이터 규격을 분리하여 통신 안정성 확보
 """
 
 import os, json, time, hmac, hashlib, base64, logging, datetime, math
@@ -69,20 +66,27 @@ def load_config():
     return cfg
 
 def load_state():
+    # 상태 파일이 깨져있을 경우 봇이 죽지 않고 초기화하도록 예외 처리 추가
     if STATE_PATH.exists():
-        with open(STATE_PATH, encoding="utf-8") as f:
-            return json.load(f)
+        try:
+            with open(STATE_PATH, encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            log.warning(f"상태 파일 읽기 실패 (초기화 진행): {e}")
     return {"positions": {}}
 
 def save_state(state):
-    with open(STATE_PATH, "w", encoding="utf-8") as f:
-        json.dump(state, f, indent=2, ensure_ascii=False, default=str)
+    try:
+        with open(STATE_PATH, "w", encoding="utf-8") as f:
+            json.dump(state, f, indent=2, ensure_ascii=False, default=str)
+    except Exception as e:
+        log.error(f"상태 저장 오류: {e}")
 
 
 # ─── OKX REST 클라이언트 ─────────────────────────────────
 class OKXClient:
     BASE = "https://www.okx.com"
-    BOT_TAG = "GUARDIANBOT"
+    # 문제의 원인이었던 BOT_TAG(algoClOrdId)는 완전히 삭제했습니다.
 
     def __init__(self, cfg):
         self.key = cfg["api_key"]
@@ -158,7 +162,6 @@ class OKXClient:
         })
         has_sl = False; has_tp = False
         sl_price = None; tp_price = None; algo_id = None
-        is_bot_order = False
 
         if d.get("code") == "0":
             for o in d.get("data", []):
@@ -171,10 +174,8 @@ class OKXClient:
                     has_tp = True; tp_price = float(tp)
                 if sl or tp:
                     algo_id = o.get("algoId")
-                    if o.get("algoClOrdId") == self.BOT_TAG:
-                        is_bot_order = True
                     break
-        return {"has_sl": has_sl, "has_tp": has_tp, "sl_price": sl_price, "tp_price": tp_price, "algo_id": algo_id, "is_bot_order": is_bot_order}
+        return {"has_sl": has_sl, "has_tp": has_tp, "sl_price": sl_price, "tp_price": tp_price, "algo_id": algo_id}
 
     def get_klines(self, inst_id, bar="15m", limit=100):
         d = self._req("GET", "/api/v5/market/candles", {"instId": inst_id, "bar": bar, "limit": str(limit)})
@@ -182,9 +183,7 @@ class OKXClient:
         return list(reversed(d.get("data", [])))
 
     def amend_tpsl(self, algo_id, inst_id, sl_price=None, tp_price=None):
-        """수정한 부분: 수정 시에는 절대 algoClOrdId를 전달하지 않고 오직 가격 변경 인자만 담습니다."""
         body = {"instId": inst_id, "algoId": algo_id}
-        body["cxlOnBlk"] = False 
         if sl_price:
             body["newSlTriggerPx"] = self.format_price(inst_id, sl_price)
             body["newSlOrdPx"] = "-1"
@@ -200,7 +199,7 @@ class OKXClient:
             res = self.amend_tpsl(algo_id, inst_id, sl_price=sl_price, tp_price=tp_price)
             if res.get("code") == "0": 
                 return res
-            log.warning(f"  ⚠️ Amend(수정) 실패 -> 기존 주문 유실 혹은 만료로 인한 신규 주문으로 재시도")
+            log.warning(f"  ⚠️ Amend 실패 -> 신규 주문으로 재시도")
 
         pos = self.get_all_positions()
         td_mode = "cross"
@@ -211,8 +210,7 @@ class OKXClient:
         body = {
             "instId": inst_id, "tdMode": td_mode,
             "side": "sell" if pos_side == "long" else "buy", "posSide": pos_side,
-            "ordType": "conditional", "closeFraction": "1",
-            "algoClOrdId": self.BOT_TAG  # 최초 생성 시에만 algoClOrdId 주입
+            "ordType": "conditional", "closeFraction": "1"
         }
         if sl_price:
             body["slTriggerPx"] = self.format_price(inst_id, sl_price)
@@ -402,7 +400,8 @@ class PositionGuardian:
         st = self.state["positions"].setdefault(pos_key, {
             "trail_high": entry if side == "long" else None,
             "trail_low":  entry if side == "short" else None,
-            "current_sl": None
+            "current_sl": None,
+            "bot_algo_id": None  # 봇이 생성한 주문번호를 저장할 공간 확보
         })
 
         pnl_pct = ((mark-entry)/entry*100) if side=="long" else ((entry-mark)/entry*100)
@@ -471,6 +470,12 @@ class PositionGuardian:
             pos_key = f"{inst_id}-{side}"
             symbol = inst_id.replace("-USDT-SWAP", "")
 
+            # 상태 불러오기 (봇 주문 번호 확인용)
+            if pos_key not in self.state["positions"]:
+                self.state["positions"][pos_key] = {}
+            st = self.state["positions"][pos_key]
+            bot_algo_id = st.get("bot_algo_id")
+
             analysis = self._analyze_symbol(inst_id, side)
             if not analysis: continue
 
@@ -482,13 +487,18 @@ class PositionGuardian:
             except: pass
 
             existing = self._get_existing_tpsl_cached(inst_id, side)
-            
-            skip_sl = self.skip_if_has_sl and existing["has_sl"] and not existing["is_bot_order"]
-            skip_tp = self.skip_if_has_tp and existing["has_tp"] and not existing["is_bot_order"]
             algo_id = existing.get("algo_id")
+            
+            # 거래소에 걸린 주문 번호가 봇이 메모리에 저장해둔 번호와 일치하는지 확인
+            is_bot_order = False
+            if algo_id and algo_id == bot_algo_id:
+                is_bot_order = True
 
-            if skip_sl: log.info(f"  ⏭️  {symbol} {side.upper()}: 사용자가 손으로 직접 설정한 수동 SL 보호 유지")
-            if skip_tp: log.info(f"  ⏭️  {symbol} {side.upper()}: 사용자가 손으로 직접 설정한 수동 TP 보호 유지")
+            skip_sl = self.skip_if_has_sl and existing["has_sl"] and not is_bot_order
+            skip_tp = self.skip_if_has_tp and existing["has_tp"] and not is_bot_order
+
+            if skip_sl: log.info(f"  ⏭️  {symbol} {side.upper()}: 사용자가 수동 설정한 SL 보호 유지")
+            if skip_tp: log.info(f"  ⏭️  {symbol} {side.upper()}: 사용자가 수동 설정한 TP 보호 유지")
 
             if skip_sl and skip_tp:
                 snapshot.append({"symbol": symbol, "inst_id": inst_id, "side": side, "sl": existing["sl_price"], "tp_price": existing["tp_price"], "sl_source": "수동보호", "skipped": True})
@@ -505,14 +515,19 @@ class PositionGuardian:
                 apply_tp = None if skip_tp else st.get("tp_price")
                 
                 if not self.dry:
-                    # 완벽 분리: set_tpsl 내에서 algo_id 유무에 따라 안전하게 요청 분기 처리됨
                     res = self.client.set_tpsl(inst_id, side, sl_price=apply_sl, tp_price=apply_tp, algo_id=algo_id)
                     if res.get("code") == "0":
                         st["_last_applied_sl"] = new_sl
+                        
+                        # 중요: 신규 주문이 들어갔다면 OKX 응답에서 부여받은 ID를 메모리에 저장
+                        new_algo_id = res.get("data", [{}])[0].get("algoId")
+                        if new_algo_id:
+                            st["bot_algo_id"] = new_algo_id
+
                         self._algo_cache.pop(pos_key, None)
-                        log.info(f"  ✅ {symbol} {side.upper()} 차트 실시간 갱신 -> 동적 익절/손절 수정 완료")
+                        log.info(f"  ✅ {symbol} {side.upper()} 동적 익절/손절 갱신 완료")
                     else:
-                        log.warning(f"  ❌ 거래소 통신 거절: {res.get('msg')}")
+                        log.warning(f"  ❌ 거래소 주문 거절: {res.get('msg')}")
                 else:
                     st["_last_applied_sl"] = new_sl
                     log.info(f"  [DRY-RUN] {symbol} 갱신 시뮬레이션: SL ${self.client.format_price(inst_id, new_sl)}")
@@ -525,7 +540,7 @@ class PositionGuardian:
     def run(self):
         log.info("=" * 60)
         log.info(" OKX Position Guardian - 실시간 동적 추적 엔진 구동 완료")
-        log.info(" 봇 탐지 상태: GUARDIAN_BOT 오더는 실시간으로 변경 추적됩니다.")
+        log.info(" 봇 탐지 방식: 봇이 생성한 주문 번호를 로컬(파일)에 기억하여 추적합니다.")
         log.info("=" * 60)
         while True:
             try: 
