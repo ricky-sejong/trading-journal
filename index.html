@@ -639,7 +639,7 @@ function refreshToday(){
         document.getElementById('l-pnl').textContent='—';
         document.getElementById('l-pct').textContent='—';
         document.getElementById('trade-list').innerHTML='<div class="empty">NO EXECUTIONS TODAY</div>';
-        document.getElementById('trade-list-label').textContent='TODAY'S ORDERS';
+        document.getElementById('trade-list-label').textContent="TODAY'S ORDERS";
       } else {
         document.getElementById('l-cnt').textContent=d.trade_count+'회 주문';
         document.getElementById('l-pnl').innerHTML='<span style="color:'+clr(d.pnl_usdt)+'">'+sg(d.pnl_usdt)+fn(d.pnl_usdt)+' USDT</span>';
@@ -699,7 +699,7 @@ function refreshToday(){
           '</div>';
         }).join('');
 
-        document.getElementById('trade-list-label').textContent='TODAY'S TRADES';
+        document.getElementById('trade-list-label').textContent="TODAY'S TRADES";
         document.getElementById('trade-list').innerHTML=pairHtml;
       }
       fetch(SERVER+'/api/balance',{signal:AbortSignal.timeout(5000)})
