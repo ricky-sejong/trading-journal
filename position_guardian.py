@@ -18,6 +18,12 @@ import os, json, time, hmac, hashlib, base64, logging, datetime, math, sys
 import urllib.request, urllib.parse, urllib.error
 from pathlib import Path
 
+try:
+    import psycopg2
+    _HAS_PSYCOPG2 = True
+except ImportError:
+    _HAS_PSYCOPG2 = False
+
 # stdout 버퍼링 비활성화 (Render 로그 지연 방지)
 try:
     sys.stdout.reconfigure(line_buffering=True)
@@ -690,7 +696,62 @@ def analyze_chart_structure(opens, highs, lows, closes, side, volumes=None, atr=
 # ─── 가디언 전역 상태 (서버에서 제어) ──────────────────────
 guardian_running    = True    # True = 활성, False = 일시정지
 guardian_instance   = None    # 서버에서 참조용
-guardian_pos_config = {}      # 포지션별 ON/OFF {"BTC-USDT-SWAP-long": True/False}
+guardian_pos_config = {}      # 포지션별 ON/OFF (메모리 캐시 — 참고용, 진실은 DB)
+
+# ─── DB 직접 조회 (프로세스 간 상태 불일치 방지) ────────────
+# 멀티 워커/스레드 환경에서 메모리 공유가 보장 안 되므로
+# 포지션별 ON/OFF는 매 루프마다 DB에서 직접 확인한다.
+_pos_config_db_cache = {"data": {}, "ts": 0}
+_POS_CONFIG_CACHE_SEC = 5  # 5초 캐싱 (DB 부하 방지, 그래도 충분히 빠른 반영)
+
+def _get_db_connection():
+    if not _HAS_PSYCOPG2:
+        return None
+    url = os.environ.get("DATABASE_URL", "")
+    if not url:
+        return None
+    url = url.split("?")[0]  # pgbouncer 파라미터 제거
+    try:
+        return psycopg2.connect(url, sslmode="require", connect_timeout=5)
+    except Exception as e:
+        log.warning(f"[DB] 연결 실패: {e}")
+        return None
+
+def get_pos_enabled_from_db(pos_key):
+    """
+    포지션별 Guardian ON/OFF를 DB에서 직접 조회 (5초 캐싱).
+    메모리 공유 문제(멀티 프로세스/스레드)를 우회하는 단일 진실 공급원.
+    기본값: True (설정 없으면 활성)
+    """
+    now = time.time()
+    if now - _pos_config_db_cache["ts"] < _POS_CONFIG_CACHE_SEC:
+        return _pos_config_db_cache["data"].get(pos_key, True)
+
+    conn = _get_db_connection()
+    if conn is None:
+        # DB 연결 실패 시 마지막 캐시값 사용 (완전 실패 방지)
+        return _pos_config_db_cache["data"].get(pos_key, True)
+
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT key, value FROM settings WHERE key LIKE %s", ("guardian_pos:%",))
+                rows = cur.fetchall()
+        fresh = {}
+        for k, v in rows:
+            clean_key = k[len("guardian_pos:"):]
+            fresh[clean_key] = (v == "true")
+        _pos_config_db_cache["data"] = fresh
+        _pos_config_db_cache["ts"] = now
+        return fresh.get(pos_key, True)
+    except Exception as e:
+        log.warning(f"[DB] 포지션 설정 조회 실패: {e}")
+        return _pos_config_db_cache["data"].get(pos_key, True)
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
 
 # ─── 포지션 가디언 ──────────────────────────────────────
 class PositionGuardian:
@@ -998,10 +1059,9 @@ class PositionGuardian:
             pos_key  = f"{inst_id}-{side}"
             symbol   = inst_id.replace("-USDT-SWAP", "")
 
-            # ── 포지션별 ON/OFF 체크 ──
-            # 기본값은 True (설정 없으면 활성)
-            pos_enabled = guardian_pos_config.get(pos_key, True)
-            log.info(f"  [설정체크] {pos_key} → enabled={pos_enabled} (전체설정: {guardian_pos_config})")
+            # ── 포지션별 ON/OFF 체크 (DB 직접 조회 — 프로세스 간 일관성 보장) ──
+            pos_enabled = get_pos_enabled_from_db(pos_key)
+            log.info(f"  [설정체크] {pos_key} → enabled={pos_enabled} (DB직접조회)")
             if not pos_enabled:
                 log.info(f"  ⏸️  {symbol} {side.upper()}: Guardian OFF (사용자 설정) — 건너뜀")
                 # 스냅샷엔 포함 (모니터링은 유지)
