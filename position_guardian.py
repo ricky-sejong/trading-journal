@@ -228,20 +228,26 @@ class OKXClient:
 
     def get_all_algo_ids(self, inst_id):
         """
-        해당 심볼의 모든 pending 조건부(algo) 주문 ID 목록 조회 (posSide 필터 없음).
-        posSide 불일치로 취소가 안 되는 문제 방지용.
+        해당 심볼의 모든 pending algo 주문 ID 목록 조회.
+        conditional 외에도 oco, trigger, move_order_stop 등 다양한 타입이 있을 수 있어
+        ordType 여러 개를 순회하며 조회한다.
         """
-        d = self._req("GET", "/api/v5/trade/orders-algo-pending", {
-            "instType": "SWAP",
-            "instId":   inst_id,
-            "ordType":  "conditional",
-        })
         ids = []
-        if d.get("code") == "0":
-            for o in d.get("data", []):
-                aid = o.get("algoId")
-                if aid:
-                    ids.append(aid)
+        seen = set()
+        for ord_type in ("conditional", "oco", "trigger", "move_order_stop"):
+            d = self._req("GET", "/api/v5/trade/orders-algo-pending", {
+                "instType": "SWAP",
+                "instId":   inst_id,
+                "ordType":  ord_type,
+            })
+            log.info(f"orders-algo-pending(ordType={ord_type}) 응답: code={d.get('code')} "
+                     f"건수={len(d.get('data', []))} raw={json.dumps(d, ensure_ascii=False)[:300]}")
+            if d.get("code") == "0":
+                for o in d.get("data", []):
+                    aid = o.get("algoId")
+                    if aid and aid not in seen:
+                        ids.append(aid)
+                        seen.add(aid)
         return ids
 
     def amend_tpsl(self, algo_id, inst_id, sl_price=None, tp_price=None):
