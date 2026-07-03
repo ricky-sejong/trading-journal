@@ -221,6 +221,13 @@ def fetch_day_balances(date_str):
     # bills는 최신순 → 오름차순 정렬
     bills_sorted = sorted(bills, key=lambda b: int(b.get('ts', 0)))
 
+    # 첫 번째 bill 로그 (디버깅용)
+    if bills_sorted:
+        b0 = bills_sorted[0]
+        bl = bills_sorted[-1]
+        print(f'[bills-debug] 첫 bill: bal={b0.get("bal")} balChg={b0.get("balChg")} pnl={b0.get("pnl")} type={b0.get("type")}')
+        print(f'[bills-debug] 끝 bill: bal={bl.get("bal")} balChg={bl.get("balChg")} pnl={bl.get("pnl")} type={bl.get("type")}')
+
     # 첫 번째 bill 직전 잔고 = 시작잔고
     # bal 필드: 해당 bill 처리 후 잔고
     # 시작잔고 = 첫 bill의 bal - 첫 bill의 pnl 변화량
