@@ -639,7 +639,7 @@ def guardian_positions_set():
 @app.route('/api/guardian/status')
 def guardian_status():
     try:
-        from position_guardian import guardian_running, guardian_instance
+        import position_guardian as pg
         state_path = 'guardian_state.json'
         state = {}
         if os.path.exists(state_path):
@@ -648,7 +648,7 @@ def guardian_status():
         latest = state.get('latest', {})
         return jsonify({
             'ok': True,
-            'running': guardian_running,
+            'running': pg.guardian_running,   # 모듈 속성으로 실시간 조회 (import 복사 X)
             'position_count': latest.get('position_count', 0),
             'positions': latest.get('positions', []),
             'last_update': latest.get('time', '—'),
