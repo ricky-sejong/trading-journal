@@ -36,18 +36,27 @@ def init_db():
             with conn.cursor() as cur:
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS journal (
-                        id          BIGINT PRIMARY KEY,
-                        date        DATE UNIQUE NOT NULL,
-                        open_bal    NUMERIC,
-                        close_bal   NUMERIC,
-                        pnl         NUMERIC,
-                        pos         TEXT DEFAULT '',
-                        memo        TEXT DEFAULT '',
-                        trades      JSONB DEFAULT '[]',
-                        trade_count INTEGER DEFAULT 0,
-                        created_at  TIMESTAMPTZ DEFAULT NOW(),
-                        updated_at  TIMESTAMPTZ DEFAULT NOW()
+                        id               BIGINT PRIMARY KEY,
+                        date             DATE UNIQUE NOT NULL,
+                        open_bal         NUMERIC,
+                        close_bal        NUMERIC,
+                        pnl              NUMERIC,
+                        pos              TEXT DEFAULT '',
+                        memo             TEXT DEFAULT '',
+                        trades           JSONB DEFAULT '[]',
+                        trade_count      INTEGER DEFAULT 0,
+                        closed_pairs     JSONB DEFAULT '[]',
+                        swing_positions  JSONB DEFAULT '[]',
+                        created_at       TIMESTAMPTZ DEFAULT NOW(),
+                        updated_at       TIMESTAMPTZ DEFAULT NOW()
                     )
+                """)
+                # 기존 테이블에 컬럼이 없으면 추가 (마이그레이션)
+                cur.execute("""
+                    ALTER TABLE journal ADD COLUMN IF NOT EXISTS closed_pairs JSONB DEFAULT '[]'
+                """)
+                cur.execute("""
+                    ALTER TABLE journal ADD COLUMN IF NOT EXISTS swing_positions JSONB DEFAULT '[]'
                 """)
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS settings (
@@ -99,32 +108,38 @@ def db_load_journal():
             cur.execute("SELECT * FROM journal ORDER BY date ASC")
             rows = cur.fetchall()
     return [{
-        'id':          r['id'],
-        'date':        str(r['date']),
-        'open':        float(r['open_bal'] or 0),
-        'close':       float(r['close_bal'] or 0),
-        'pnl':         float(r['pnl'] or 0),
-        'pos':         r['pos'] or '',
-        'memo':        r['memo'] or '',
-        'trades':      r['trades'] if r['trades'] else [],
-        'trade_count': r['trade_count'] or 0,
+        'id':               r['id'],
+        'date':             str(r['date']),
+        'open':             float(r['open_bal'] or 0),
+        'close':            float(r['close_bal'] or 0),
+        'pnl':              float(r['pnl'] or 0),
+        'pos':              r['pos'] or '',
+        'memo':             r['memo'] or '',
+        'trades':           r['trades'] if r['trades'] else [],
+        'trade_count':      r['trade_count'] or 0,
+        'closed_pairs':     r.get('closed_pairs') if r.get('closed_pairs') else [],
+        'swing_positions':  r.get('swing_positions') if r.get('swing_positions') else [],
     } for r in rows]
 
 def db_upsert(entry):
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute("""
-                INSERT INTO journal (id, date, open_bal, close_bal, pnl, pos, memo, trades, trade_count, updated_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                INSERT INTO journal (id, date, open_bal, close_bal, pnl, pos, memo, trades, trade_count,
+                                      closed_pairs, swing_positions, updated_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
                 ON CONFLICT (date) DO UPDATE SET
                     open_bal=EXCLUDED.open_bal, close_bal=EXCLUDED.close_bal,
                     pnl=EXCLUDED.pnl, pos=EXCLUDED.pos, memo=EXCLUDED.memo,
-                    trades=EXCLUDED.trades, trade_count=EXCLUDED.trade_count, updated_at=NOW()
+                    trades=EXCLUDED.trades, trade_count=EXCLUDED.trade_count,
+                    closed_pairs=EXCLUDED.closed_pairs, swing_positions=EXCLUDED.swing_positions,
+                    updated_at=NOW()
             """, (
                 entry.get('id', int(time.time()*1000)), entry['date'],
                 entry.get('open',0), entry.get('close',0), entry.get('pnl',0),
                 entry.get('pos',''), entry.get('memo',''),
                 json.dumps(entry.get('trades',[])), entry.get('trade_count',0),
+                json.dumps(entry.get('closed_pairs',[])), json.dumps(entry.get('swing_positions',[])),
             ))
         conn.commit()
 
