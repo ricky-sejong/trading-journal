@@ -35,10 +35,10 @@ DEFAULT_CONFIG = {
 
     # 감시 대상
     "watch_all_positions": True,
-    "watch_symbols":       [],        # watch_all_positions=False일 때만 사용 (예: ["BTC-USDT-SWAP"])
+    "watch_symbols":       [],
 
     # 캔들 설정
-    "kline_interval": "15m",          # 1m 3m 5m 15m 30m 1H 4H 1D
+    "kline_interval": "15m",       # 1m 3m 5m 15m 30m 1H 4H 1D
     "kline_limit":    100,
 
     # 트레일링 스탑
@@ -54,12 +54,23 @@ DEFAULT_CONFIG = {
     "atr_max_pct":    3.0,
 
     # TP 최소값 / RR 보장
-    "min_tp_pct":   0.5,    # 진입가 대비 최소 TP 거리 % (수수료 커버)
-    "min_rr":       1.5,    # 최소 리스크:리워드 비율 (SL거리 × min_rr 이상)
+    "min_tp_pct": 0.5,   # 진입가 대비 최소 TP 거리 % (수수료 커버)
+    "min_rr":     1.5,   # 최소 리스크:리워드 비율
+
+    # 폴백 기본값 (구조 분석 + ATR 모두 실패 시)
+    "default_sl_pct": 1.5,   # ← 버그 수정: 누락된 키 추가
+    "default_tp_pct": 3.0,
 
     # 안전장치
     "max_loss_pct_of_margin": 80,
     "min_sl_distance_pct":    0.2,
+
+    # SL/TP 기존 주문 유지 여부
+    "skip_if_has_sl": True,
+    "skip_if_has_tp": True,   # ← True로 변경: 사용자 TP 보호
+
+    # API 캐싱 (algo 주문 조회 간격)
+    "algo_cache_sec": 30,    # ← 30초마다만 algo 주문 조회
 
     "poll_interval_sec": 10,
     "dry_run": False,
@@ -173,7 +184,7 @@ class OKXClient:
     def get_existing_tpsl(self, inst_id, pos_side):
         """
         해당 포지션에 이미 설정된 TP/SL 알고 주문 조회.
-        반환: {'has_sl': bool, 'has_tp': bool, 'sl_price': float|None, 'tp_price': float|None}
+        반환: {'has_sl': bool, 'has_tp': bool, 'sl_price': float|None, 'tp_price': float|None, 'algo_id': str|None}
         """
         d = self._req("GET", "/api/v5/trade/orders-algo-pending", {
             "instType": "SWAP",
@@ -181,7 +192,7 @@ class OKXClient:
             "ordType":  "conditional",
         })
         has_sl = False; has_tp = False
-        sl_price = None; tp_price = None
+        sl_price = None; tp_price = None; algo_id = None
         if d.get("code") == "0":
             for o in d.get("data", []):
                 if o.get("posSide") != pos_side:
@@ -194,9 +205,68 @@ class OKXClient:
                 if tp and float(tp) > 0:
                     has_tp = True
                     tp_price = float(tp)
-        return {"has_sl": has_sl, "has_tp": has_tp, "sl_price": sl_price, "tp_price": tp_price}
+                if sl or tp:
+                    algo_id = o.get("algoId")
+        return {"has_sl": has_sl, "has_tp": has_tp,
+                "sl_price": sl_price, "tp_price": tp_price, "algo_id": algo_id}
 
-    def get_klines(self, inst_id, bar, limit):
+    def amend_tpsl(self, algo_id, inst_id, sl_price=None, tp_price=None):
+        """
+        기존 알고 주문 수정 (amend-algo-order).
+        SL 공백 없이 안전하게 수정 가능.
+        """
+        body = {"instId": inst_id, "algoId": algo_id}
+        if sl_price:
+            body["newSlTriggerPx"]     = f"{sl_price:.4f}"
+            body["newSlOrdPx"]         = "-1"
+            body["newSlTriggerPxType"] = "mark"
+        if tp_price:
+            body["newTpTriggerPx"]     = f"{tp_price:.4f}"
+            body["newTpOrdPx"]         = "-1"
+            body["newTpTriggerPxType"] = "mark"
+        log.info(f"AMEND 요청: algoId={algo_id} SL={sl_price} TP={tp_price}")
+        return self._req("POST", "/api/v5/trade/amend-algo-order", body=body)
+
+    def set_tpsl(self, inst_id, pos_side, sl_price=None, tp_price=None, algo_id=None):
+        """
+        TP/SL 설정.
+        - algo_id 있으면 → amend-algo-order (안전, SL 공백 없음)
+        - algo_id 없으면 → order-algo (신규 생성)
+        """
+        # 기존 주문 수정 (권장)
+        if algo_id:
+            res = self.amend_tpsl(algo_id, inst_id, sl_price=sl_price, tp_price=tp_price)
+            if res.get("code") == "0":
+                return res
+            log.warning(f"amend 실패 ({res.get('msg')}) → 신규 주문으로 폴백")
+
+        # 신규 주문 생성
+        pos = self.get_all_positions()
+        td_mode = "cross"
+        for p in pos:
+            if p["instId"] == inst_id and p["posSide"] == pos_side:
+                td_mode = p.get("mgnMode", "cross")
+                break
+
+        body = {
+            "instId":        inst_id,
+            "tdMode":        td_mode,
+            "side":          "sell" if pos_side == "long" else "buy",
+            "posSide":       pos_side,
+            "ordType":       "conditional",
+            "closeFraction": "1",
+        }
+        if sl_price:
+            body["slTriggerPx"]     = f"{sl_price:.4f}"
+            body["slOrdPx"]         = "-1"
+            body["slTriggerPxType"] = "mark"
+        if tp_price:
+            body["tpTriggerPx"]     = f"{tp_price:.4f}"
+            body["tpOrdPx"]         = "-1"
+            body["tpTriggerPxType"] = "mark"
+
+        log.info(f"신규 TP/SL 요청: {json.dumps(body, ensure_ascii=False)}")
+        return self._req("POST", "/api/v5/trade/order-algo", body=body)
         """
         캔들 조회. OKX bar 값: 1m 3m 5m 15m 30m 1H 4H 1D
         반환: [[ts, open, high, low, close, vol, volCcy, volCcyQuote, confirm], ...]
@@ -446,9 +516,22 @@ class PositionGuardian:
         self.client = OKXClient(cfg)
         self.state  = load_state()
         self.dry    = cfg.get("dry_run", True)
-        # 기존 SL/TP가 있을 때 건너뛸지 여부 (설정으로 제어)
         self.skip_if_has_sl = cfg.get("skip_if_has_sl", True)
-        self.skip_if_has_tp = cfg.get("skip_if_has_tp", False)  # TP는 기본적으로 덮어씀
+        self.skip_if_has_tp = cfg.get("skip_if_has_tp", True)  # True로 변경
+        # algo 주문 캐시 (포지션키 → {result, ts})
+        self._algo_cache     = {}
+        self._algo_cache_sec = cfg.get("algo_cache_sec", 30)
+
+    def _get_existing_tpsl_cached(self, inst_id, pos_side):
+        """캐싱된 algo 주문 조회 (30초마다만 실제 API 호출)"""
+        key = f"{inst_id}-{pos_side}"
+        now = time.time()
+        cached = self._algo_cache.get(key)
+        if cached and now - cached["ts"] < self._algo_cache_sec:
+            return cached["result"]
+        result = self.client.get_existing_tpsl(inst_id, pos_side)
+        self._algo_cache[key] = {"result": result, "ts": now}
+        return result
 
     def _bar_to_okx(self, interval):
         """설정값 → OKX bar 파라미터 변환"""
@@ -694,10 +777,11 @@ class PositionGuardian:
                     log.warning("     [DRY-RUN] 긴급 청산 생략")
                 continue
 
-            # 기존 SL/TP 조회
-            existing = self.client.get_existing_tpsl(inst_id, side)
+            # 기존 SL/TP 조회 (캐싱)
+            existing = self._get_existing_tpsl_cached(inst_id, side)
             skip_sl = self.skip_if_has_sl and existing["has_sl"]
             skip_tp = self.skip_if_has_tp and existing["has_tp"]
+            algo_id = existing.get("algo_id")
 
             if skip_sl:
                 log.info(f"  ⏭️  {symbol} {side.upper()}: 기존 SL ${existing['sl_price']:,.4f} 감지 — SL 건너뜀")
@@ -747,13 +831,18 @@ class PositionGuardian:
             if should_update:
                 apply_sl = None if skip_sl else new_sl
                 apply_tp = None if skip_tp else st.get("tp_price")
+                td_mode = pos.get("mgnMode", "cross")
                 if apply_sl is None and apply_tp is None:
                     log.info(f"     → SL/TP 모두 사용자 설정 유지")
                 elif not self.dry:
                     res = self.client.set_tpsl(inst_id, side,
-                                               sl_price=apply_sl, tp_price=apply_tp)
+                                               sl_price=apply_sl, tp_price=apply_tp,
+                                               algo_id=algo_id)
                     if res.get("code") == "0":
                         st["_last_applied_sl"] = new_sl
+                        # 캐시 무효화 (주문 변경됨)
+                        cache_key = f"{inst_id}-{side}"
+                        self._algo_cache.pop(cache_key, None)
                         log.info(f"     → SL 갱신 완료{' (TP 건너뜀)' if skip_tp else ''}")
                     else:
                         log.warning(f"     → SL 갱신 실패: {res.get('msg')}")
