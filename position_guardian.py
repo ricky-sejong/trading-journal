@@ -1,17 +1,12 @@
 """
-OKX Position Guardian — 보유 포지션 자동 익절/손절 관리
+OKX Position Guardian — 보유 포지션 자동 익절/손절 관리 (버그 수정 및 안정화 버전)
 ================================================================
-Bitget 버전을 OKX API v5 기준으로 완전 변환.
-
 기능:
   - OKX 계정의 모든 SWAP 포지션 자동 감시
   - 포지션별 캔들 데이터로 차트 구조(스윙 고저점 / 추세선 / 지지저항 / 캔들패턴) 분석
   - 구조 기반 SL/TP 자동 설정 + 트레일링 스탑 (래칫 방식)
-  - ATR은 구조 미감지 시 폴백으로만 사용
+  - 종목별 tickSz(최소 가격 단위)를 동적으로 파악하여 주문 거절 방지
   - 마진 대비 손실 한도 초과 시 긴급 시장가 청산
-
-환경변수 (Render):
-  OKX_API_KEY, OKX_SECRET_KEY, OKX_PASSPHRASE
 """
 
 import os, json, time, hmac, hashlib, base64, logging, datetime, math
@@ -28,7 +23,6 @@ log = logging.getLogger("Guardian")
 
 # ─── 기본 설정 ───────────────────────────────────────────
 DEFAULT_CONFIG = {
-    # Render에서는 환경변수로 주입 (아래 값은 로컬 테스트용)
     "api_key":    os.environ.get("OKX_API_KEY",    "YOUR_API_KEY"),
     "api_secret": os.environ.get("OKX_SECRET_KEY", "YOUR_SECRET_KEY"),
     "passphrase": os.environ.get("OKX_PASSPHRASE", "YOUR_PASSPHRASE"),
@@ -38,7 +32,7 @@ DEFAULT_CONFIG = {
     "watch_symbols":       [],
 
     # 캔들 설정
-    "kline_interval": "15m",       # 1m 3m 5m 15m 30m 1H 4H 1D
+    "kline_interval": "15m",       
     "kline_limit":    100,
 
     # 트레일링 스탑
@@ -54,11 +48,11 @@ DEFAULT_CONFIG = {
     "atr_max_pct":    3.0,
 
     # TP 최소값 / RR 보장
-    "min_tp_pct": 0.5,   # 진입가 대비 최소 TP 거리 % (수수료 커버)
-    "min_rr":     1.5,   # 최소 리스크:리워드 비율
+    "min_tp_pct": 0.5,   
+    "min_rr":     1.5,   
 
-    # 폴백 기본값 (구조 분석 + ATR 모두 실패 시)
-    "default_sl_pct": 1.5,   # ← 버그 수정: 누락된 키 추가
+    # 폴백 기본값
+    "default_sl_pct": 1.5,   
     "default_tp_pct": 3.0,
 
     # 안전장치
@@ -67,11 +61,11 @@ DEFAULT_CONFIG = {
 
     # SL/TP 기존 주문 유지 여부
     "skip_if_has_sl": True,
-    "skip_if_has_tp": True,   # ← True로 변경: 사용자 TP 보호
+    "skip_if_has_tp": True,   
 
-    # API 캐싱 (algo 주문 조회 간격)
-    "algo_cache_sec": 30,    # ← 30초마다만 algo 주문 조회
-
+    # API 캐싱 및 동기화 주기
+    "algo_cache_sec": 30,    
+    "market_sync_sec": 3600,  # 1시간마다 tickSz 스펙 갱신
     "poll_interval_sec": 10,
     "dry_run": False,
 }
@@ -80,13 +74,10 @@ STATE_PATH = Path("guardian_state.json")
 
 def load_config():
     cfg = dict(DEFAULT_CONFIG)
-    # 환경변수가 있으면 덮어쓰기
     if os.environ.get("OKX_API_KEY"):
         cfg["api_key"]    = os.environ["OKX_API_KEY"]
         cfg["api_secret"] = os.environ["OKX_SECRET_KEY"]
         cfg["passphrase"] = os.environ["OKX_PASSPHRASE"]
-    # Render 환경에서는 dry_run=False 기본으로
-    if os.environ.get("OKX_API_KEY"):
         cfg["dry_run"] = False
     return cfg
 
@@ -109,9 +100,13 @@ class OKXClient:
         self.key = cfg["api_key"]
         self.sec = cfg["api_secret"]
         self.pp  = cfg["passphrase"]
+        self.tick_sizes = {}  # 수정한 부분 3: 종목별 tickSz 캐싱 딕셔너리
+        self.last_sync_market = 0
+        self.market_sync_sec = cfg.get("market_sync_sec", 3600)
 
     def _ts(self):
-        return datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
+        # Python 최신 버전 호환성을 고려한 UTC 시간대 표현 기법
+        return datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
 
     def _sign(self, ts, method, path, body=""):
         msg = ts + method.upper() + path + body
@@ -125,7 +120,6 @@ class OKXClient:
 
         ts = self._ts()
         b = json.dumps(body) if body else ""
-
         sig = self._sign(ts, method, full_path, b)
 
         headers = {
@@ -134,47 +128,60 @@ class OKXClient:
             "OK-ACCESS-TIMESTAMP": ts,
             "OK-ACCESS-PASSPHRASE": self.pp,
             "Content-Type": "application/json",
-            "User-Agent":           'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            "User-Agent": 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
         }
 
         url = self.BASE + full_path
-
         try:
-            req = urllib.request.Request(
-                url,
-                data=b.encode() if b else None,
-                headers=headers,
-                method=method
-            )
-
+            req = urllib.request.Request(url, data=b.encode() if b else None, headers=headers, method=method)
             with urllib.request.urlopen(req, timeout=10) as resp:
                 return json.loads(resp.read().decode())
-
         except urllib.error.HTTPError as e:
-
             body = e.read().decode()
-
-            log.error("=" * 60)
-            log.error(f"HTTP {e.code}")
-            log.error(body)
-            log.error("=" * 60)
-
-            try:
-                return json.loads(body)
-            except:
-                return {
-                    "code": "-1",
-                    "msg": body
-                }
-
+            log.error(f"HTTP {e.code}: {body}")
+            try: return json.loads(body)
+            except: return {"code": "-1", "msg": body}
         except Exception as e:
             log.error(e)
-            return {
-                "code": "-1",
-                "msg": str(e)
-            }
+            return {"code": "-1", "msg": str(e)}
+
+    def sync_market_specs(self):
+        """수정한 부분 3: OKX로부터 SWAP 상품들의 최소 가격 변동 단위(tickSz)를 가져옵니다."""
+        now = time.time()
+        if self.tick_sizes and (now - self.last_sync_market < self.market_sync_sec):
+            return
+        
+        log.info("거래소 종목 스펙(tickSz) 동기화 중...")
+        d = self._req("GET", "/api/v5/public/instruments", {"instType": "SWAP"})
+        if d.get("code") == "0":
+            for inst in d.get("data", []):
+                inst_id = inst.get("instId")
+                tick_sz = inst.get("tickSz")
+                if inst_id and tick_sz:
+                    self.tick_sizes[inst_id] = float(tick_sz)
+            self.last_sync_market = now
+            log.info(f"동기화 완료: {len(self.tick_sizes)}개 종목 로드됨.")
+        else:
+            log.error(f"시장 스펙 동기화 실패: {d.get('msg')}")
+
+    def format_price(self, inst_id, price):
+        """수정한 부분 3: 가격을 해당 자산의 tickSz 자릿수에 완벽히 맞춰 포맷팅합니다."""
+        if not price:
+            return ""
+        self.sync_market_specs()
+        tick_sz = self.tick_sizes.get(inst_id, 0.0001) # 없으면 기본 소수점 4자리 폴백
+        
+        # tickSz 기반 정밀도 자릿수 계산 (예: 0.1 -> 1, 0.0001 -> 4, 2.5e-05 -> 5)
+        if tick_sz >= 1:
+            precision = 0
+        else:
+            precision = int(round(-math.log10(tick_sz)))
+            
+        # 소수점 단위 끊어주기 후 문자열 변환
+        rounded_price = round(round(price / tick_sz) * tick_sz, precision)
+        return f"{rounded_price:.{precision}f}"
+
     def get_all_positions(self):
-        """모든 SWAP 포지션 조회"""
         d = self._req("GET", "/api/v5/account/positions", {"instType": "SWAP"})
         if d.get("code") != "0":
             log.error(f"포지션 조회 실패: {d.get('msg')}")
@@ -182,10 +189,6 @@ class OKXClient:
         return [p for p in d.get("data", []) if float(p.get("pos", 0)) != 0]
 
     def get_existing_tpsl(self, inst_id, pos_side):
-        """
-        해당 포지션에 이미 설정된 TP/SL 알고 주문 조회.
-        반환: {'has_sl': bool, 'has_tp': bool, 'sl_price': float|None, 'tp_price': float|None, 'algo_id': str|None}
-        """
         d = self._req("GET", "/api/v5/trade/orders-algo-pending", {
             "instType": "SWAP",
             "instId":   inst_id,
@@ -210,37 +213,36 @@ class OKXClient:
         return {"has_sl": has_sl, "has_tp": has_tp,
                 "sl_price": sl_price, "tp_price": tp_price, "algo_id": algo_id}
 
+    def get_klines(self, inst_id, bar="15m", limit=100):
+        """수정한 부분 1: 분석 로직에 필수적인 캔들 데이터 조회 메서드를 정상 복구했습니다."""
+        d = self._req("GET", "/api/v5/market/candles", {
+            "instId": inst_id, "bar": bar, "limit": str(limit)
+        })
+        if d.get("code") != "0":
+            log.error(f"캔들 조회 실패 {inst_id}: {d.get('msg')}")
+            return []
+        return list(reversed(d.get("data", [])))  # 오래된 것 → 최신 순 정렬
+
     def amend_tpsl(self, algo_id, inst_id, sl_price=None, tp_price=None):
-        """
-        기존 알고 주문 수정 (amend-algo-order).
-        SL 공백 없이 안전하게 수정 가능.
-        """
         body = {"instId": inst_id, "algoId": algo_id}
         if sl_price:
-            body["newSlTriggerPx"]     = f"{sl_price:.4f}"
+            body["newSlTriggerPx"]     = self.format_price(inst_id, sl_price) # 수정한 부분 3 적용
             body["newSlOrdPx"]         = "-1"
             body["newSlTriggerPxType"] = "mark"
         if tp_price:
-            body["newTpTriggerPx"]     = f"{tp_price:.4f}"
+            body["newTpTriggerPx"]     = self.format_price(inst_id, tp_price) # 수정한 부분 3 적용
             body["newTpOrdPx"]         = "-1"
             body["newTpTriggerPxType"] = "mark"
-        log.info(f"AMEND 요청: algoId={algo_id} SL={sl_price} TP={tp_price}")
+        log.info(f"AMEND 요청: algoId={algo_id} SL={body.get('newSlTriggerPx')} TP={body.get('newTpTriggerPx')}")
         return self._req("POST", "/api/v5/trade/amend-algo-order", body=body)
 
     def set_tpsl(self, inst_id, pos_side, sl_price=None, tp_price=None, algo_id=None):
-        """
-        TP/SL 설정.
-        - algo_id 있으면 → amend-algo-order (안전, SL 공백 없음)
-        - algo_id 없으면 → order-algo (신규 생성)
-        """
-        # 기존 주문 수정 (권장)
         if algo_id:
             res = self.amend_tpsl(algo_id, inst_id, sl_price=sl_price, tp_price=tp_price)
             if res.get("code") == "0":
                 return res
-            log.warning(f"amend 실패 ({res.get('msg')}) → 신규 주문으로 폴백")
+            log.warning(f"amend 실패 ({res.get('msg')}) → 신규 주문으로 전환")
 
-        # 신규 주문 생성
         pos = self.get_all_positions()
         td_mode = "cross"
         for p in pos:
@@ -257,107 +259,43 @@ class OKXClient:
             "closeFraction": "1",
         }
         if sl_price:
-            body["slTriggerPx"]     = f"{sl_price:.4f}"
+            body["slTriggerPx"]     = self.format_price(inst_id, sl_price) # 수정한 부분 3 적용
             body["slOrdPx"]         = "-1"
             body["slTriggerPxType"] = "mark"
         if tp_price:
-            body["tpTriggerPx"]     = f"{tp_price:.4f}"
+            body["tpTriggerPx"]     = self.format_price(inst_id, tp_price) # 수정한 부분 3 적용
             body["tpOrdPx"]         = "-1"
             body["tpTriggerPxType"] = "mark"
 
         log.info(f"신규 TP/SL 요청: {json.dumps(body, ensure_ascii=False)}")
         return self._req("POST", "/api/v5/trade/order-algo", body=body)
-        """
-        캔들 조회. OKX bar 값: 1m 3m 5m 15m 30m 1H 4H 1D
-        반환: [[ts, open, high, low, close, vol, volCcy, volCcyQuote, confirm], ...]
-        최신 캔들이 index 0 (내림차순) → 반전해서 사용
-        """
-        d = self._req("GET", "/api/v5/market/candles", {
-            "instId": inst_id, "bar": bar, "limit": str(limit)
-        })
-        if d.get("code") != "0":
-            log.error(f"캔들 조회 실패 {inst_id}: {d.get('msg')}")
-            return []
-        return list(reversed(d.get("data", [])))  # 오래된 것 → 최신 순으로 정렬
 
-    def set_tpsl(self, inst_id, pos_side, sl_price=None, tp_price=None):
-
-        # 포지션 조회해서 실제 mgnMode 가져오기
-        pos = self.get_all_positions()
-
-        td_mode = "cross"
-
-        for p in pos:
-            if p["instId"] == inst_id and p["posSide"] == pos_side:
-                td_mode = p.get("mgnMode", "cross")
-                break
-
-        body = {
-            "instId":        inst_id,
-            "tdMode":        td_mode,
-            "side":          "sell" if pos_side == "long" else "buy",  # 필수: 청산 방향
-            "posSide":       pos_side,
-            "ordType":       "conditional",
-            "closeFraction": "1",   # 전량 청산
-        }
-
-        if sl_price is not None:
-            body["slTriggerPx"] = str(round(sl_price, 4))
-            body["slOrdPx"] = "-1"
-            body["slTriggerPxType"] = "mark"
-
-        if tp_price is not None:
-            body["tpTriggerPx"] = str(round(tp_price, 4))
-            body["tpOrdPx"] = "-1"
-            body["tpTriggerPxType"] = "mark"
-
-        log.info(f"TP/SL 요청: {json.dumps(body, indent=2)}")
-
-        return self._req(
-            "POST",
-            "/api/v5/trade/order-algo",
-            body=body
-        )
     def close_position_market(self, inst_id, pos_side):
-
         td_mode = "cross"
-
         for p in self.get_all_positions():
             if p["instId"] == inst_id and p["posSide"] == pos_side:
                 td_mode = p.get("mgnMode", "cross")
                 break
-
         body = {
             "instId": inst_id,
             "posSide": pos_side,
             "mgnMode": td_mode
         }
+        return self._req("POST", "/api/v5/trade/close-position", body=body)
 
-        return self._req(
-            "POST",
-            "/api/v5/trade/close-position",
-            body=body
-        )
 
-# ─── 지표 & 차트 구조 분석 ──────────────────────────────
+# ─── 지표 & 차트 구조 분석 (기존 유지) ─────────────────
 def calc_atr(highs, lows, closes, period=14):
-    if len(closes) < period + 1:
-        return None
+    if len(closes) < period + 1: return None
     trs = []
     for i in range(1, len(closes)):
-        tr = max(
-            highs[i] - lows[i],
-            abs(highs[i] - closes[i-1]),
-            abs(lows[i]  - closes[i-1]),
-        )
+        tr = max(highs[i] - lows[i], abs(highs[i] - closes[i-1]), abs(lows[i]  - closes[i-1]))
         trs.append(tr)
-    if len(trs) < period:
-        return None
+    if len(trs) < period: return None
     atr = sum(trs[:period]) / period
     for i in range(period, len(trs)):
         atr = (atr * (period - 1) + trs[i]) / period
     return atr
-
 
 def find_swing_points(highs, lows, left=3, right=3):
     n = len(highs)
@@ -371,13 +309,11 @@ def find_swing_points(highs, lows, left=3, right=3):
             swings.append((i, lows[i], 'low'))
     return swings
 
-
 def find_support_resistance(closes, highs, lows, lookback=80, n_levels=4, cluster_pct=0.5):
     start = max(0, len(closes) - lookback)
     h = highs[start:]; l = lows[start:]
     swings = find_swing_points(h, l)
-    if not swings:
-        return []
+    if not swings: return []
     prices = sorted([p for _, p, _ in swings])
     clusters = []
     current = [prices[0]]
@@ -391,21 +327,17 @@ def find_support_resistance(closes, highs, lows, lookback=80, n_levels=4, cluste
     levels = sorted(clusters, key=len, reverse=True)[:n_levels]
     return [sum(c)/len(c) for c in levels]
 
-
 def nearest_support(levels, price):
     below = [lv for lv in levels if lv < price]
     return max(below) if below else None
-
 
 def nearest_resistance(levels, price):
     above = [lv for lv in levels if lv > price]
     return min(above) if above else None
 
-
 def detect_trendline_slope(swings, side, last_n=4):
     pts = [(i, p) for i, p, t in swings if t == side][-last_n:]
-    if len(pts) < 2:
-        return None
+    if len(pts) < 2: return None
     xs = [p[0] for p in pts]; ys = [p[1] for p in pts]
     n = len(xs); mean_x = sum(xs)/n; mean_y = sum(ys)/n
     num = sum((xs[i]-mean_x)*(ys[i]-mean_y) for i in range(n))
@@ -414,11 +346,9 @@ def detect_trendline_slope(swings, side, last_n=4):
     slope = num/den
     return slope, mean_y - slope*mean_x
 
-
 def trendline_value_at(tl, idx):
     if tl is None: return None
     return tl[0] * idx + tl[1]
-
 
 def detect_candle_pattern(opens, highs, lows, closes, i):
     if i < 1: return None
@@ -433,7 +363,6 @@ def detect_candle_pattern(opens, highs, lows, closes, i):
     if lower_wick > body*2 and lower_wick > upper_wick*2: return 'pin_bottom'
     if upper_wick > body*2 and upper_wick > lower_wick*2: return 'pin_top'
     return None
-
 
 def analyze_chart_structure(opens, highs, lows, closes, side):
     n = len(closes); last_price = closes[-1]
@@ -457,14 +386,14 @@ def analyze_chart_structure(opens, highs, lows, closes, side):
     if side == 'long':
         if last_swing_low and last_swing_low < last_price:
             sl_candidates.append(last_swing_low)
-            reasons.append(f"직전 스윙 저점 ${last_swing_low:,.4f}")
+            reasons.append(f"직전 스윙 저점")
         if low_tl_now and low_tl_now < last_price:
             sl_candidates.append(low_tl_now)
-            reasons.append(f"상승 추세선 ${low_tl_now:,.4f}")
+            reasons.append(f"상승 추세선")
         sup = nearest_support(sr_levels, last_price)
         if sup and sup < last_price:
             sl_candidates.append(sup)
-            reasons.append(f"근접 지지대 ${sup:,.4f}")
+            reasons.append(f"근접 지지대")
         res = nearest_resistance(sr_levels, last_price)
         if res: tp_candidates.append(res)
         if last_swing_high and last_swing_high > last_price:
@@ -478,14 +407,14 @@ def analyze_chart_structure(opens, highs, lows, closes, side):
     else:
         if last_swing_high and last_swing_high > last_price:
             sl_candidates.append(last_swing_high)
-            reasons.append(f"직전 스윙 고점 ${last_swing_high:,.4f}")
+            reasons.append(f"직전 스윙 고점")
         if high_tl_now and high_tl_now > last_price:
             sl_candidates.append(high_tl_now)
-            reasons.append(f"하락 추세선 ${high_tl_now:,.4f}")
+            reasons.append(f"하락 추세선")
         res2 = nearest_resistance(sr_levels, last_price)
         if res2 and res2 > last_price:
             sl_candidates.append(res2)
-            reasons.append(f"근접 저항대 ${res2:,.4f}")
+            reasons.append(f"근접 저항대")
         sup2 = nearest_support(sr_levels, last_price)
         if sup2: tp_candidates.append(sup2)
         if last_swing_low and last_swing_low < last_price:
@@ -504,12 +433,11 @@ def analyze_chart_structure(opens, highs, lows, closes, side):
     }
 
 
-# ─── 가디언 전역 상태 (서버에서 제어) ──────────────────────
-guardian_running    = True    # True = 활성, False = 일시정지
-guardian_instance   = None    # 서버에서 참조용
-guardian_pos_config = {}      # 포지션별 ON/OFF {"BTC-USDT-SWAP-long": True/False}
+# ─── 가디언 실행 부 ──────────────────────────────────────
+guardian_running    = True    
+guardian_instance   = None    
+guardian_pos_config = {}      
 
-# ─── 포지션 가디언 ──────────────────────────────────────
 class PositionGuardian:
     def __init__(self, cfg):
         self.cfg    = cfg
@@ -517,13 +445,14 @@ class PositionGuardian:
         self.state  = load_state()
         self.dry    = cfg.get("dry_run", True)
         self.skip_if_has_sl = cfg.get("skip_if_has_sl", True)
-        self.skip_if_has_tp = cfg.get("skip_if_has_tp", True)  # True로 변경
-        # algo 주문 캐시 (포지션키 → {result, ts})
+        self.skip_if_has_tp = cfg.get("skip_if_has_tp", True)  
         self._algo_cache     = {}
         self._algo_cache_sec = cfg.get("algo_cache_sec", 30)
+        
+        # 기동 즉시 심볼 자릿수 데이터 스펙 로드
+        self.client.sync_market_specs()
 
     def _get_existing_tpsl_cached(self, inst_id, pos_side):
-        """캐싱된 algo 주문 조회 (30초마다만 실제 API 호출)"""
         key = f"{inst_id}-{pos_side}"
         now = time.time()
         cached = self._algo_cache.get(key)
@@ -534,7 +463,6 @@ class PositionGuardian:
         return result
 
     def _bar_to_okx(self, interval):
-        """설정값 → OKX bar 파라미터 변환"""
         mapping = {
             "1m":"1m","3m":"3m","5m":"5m","15m":"15m","30m":"30m",
             "1h":"1H","1H":"1H","4h":"4H","4H":"4H","1d":"1D","1D":"1D",
@@ -550,10 +478,9 @@ class PositionGuardian:
 
     def _analyze_symbol(self, inst_id, side):
         bar  = self._bar_to_okx(self.cfg["kline_interval"])
-        raw  = self.client.get_klines(inst_id, bar, self.cfg["kline_limit"])
+        raw  = self.client.get_klines(inst_id, bar, self.cfg["kline_limit"]) # 이제 에러 없이 작동함
         if not raw or len(raw) < self.cfg["atr_period"] + 5:
             return None
-        # OKX 캔들 포맷: [ts, open, high, low, close, vol, volCcy, volCcyQuote, confirm]
         opens  = [float(c[1]) for c in raw]
         highs  = [float(c[2]) for c in raw]
         lows   = [float(c[3]) for c in raw]
@@ -566,8 +493,8 @@ class PositionGuardian:
         }
 
     def _calc_dynamic_sl(self, pos, analysis, pos_key):
-        # OKX 필드명 매핑 (빈 문자열 방어)
         side  = pos.get("posSide", "long")
+        inst_id = pos.get("instId", "")
         try:
             entry = float(pos.get("avgPx", 0) or 0)
             mark  = float(pos.get("markPx", 0) or analysis["last_price"])
@@ -584,11 +511,8 @@ class PositionGuardian:
         })
 
         pnl_pct = ((mark-entry)/entry*100) if side=="long" else ((entry-mark)/entry*100)
-
-        # ── 1) 구조 기반 SL ──
         structural_sl = struct.get("sl_price")
 
-        # ── 2) ATR 폴백 ──
         atr_pct_dist = None
         if cfg.get("atr_enabled") and analysis["atr"]:
             atr_pct = analysis["atr"] / mark * 100
@@ -613,7 +537,6 @@ class PositionGuardian:
             base_sl = mark*(1-sl_dist_pct/100) if side=="long" else mark*(1+sl_dist_pct/100)
             struct_source = "기본값 폴백"
 
-        # ── 3) 트레일링 ──
         trailing_active = cfg.get("trailing_enabled") and pnl_pct >= cfg["trail_activate_pct"]
 
         if side == "long":
@@ -625,7 +548,7 @@ class PositionGuardian:
             else:
                 new_sl = base_sl
             if st["current_sl"] is not None:
-                new_sl = max(new_sl, st["current_sl"])  # 래칫
+                new_sl = max(new_sl, st["current_sl"])  
             min_gap = mark * (cfg["min_sl_distance_pct"]/100)
             if mark - new_sl < min_gap:
                 new_sl = mark - min_gap
@@ -654,18 +577,14 @@ class PositionGuardian:
             "last_update":     datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         })
 
-        # ── 4) TP 보정 — 최소 TP % + 최소 RR 보장 ──
         raw_tp = struct.get("tp_price")
         min_tp_pct = cfg.get("min_tp_pct", 0.5)
         min_rr     = cfg.get("min_rr", 1.5)
 
         if side == "long":
-            # 최소 TP 가격 (진입가 기준 0.5% 이상)
             min_tp_by_pct = entry * (1 + min_tp_pct / 100)
-            # 최소 RR 보장 TP (SL 거리 × min_rr)
             sl_dist_abs   = mark - new_sl
             min_tp_by_rr  = mark + sl_dist_abs * min_rr
-            # 구조적 TP가 두 조건 모두 만족하면 그대로, 아니면 더 먼 값으로 보정
             min_tp_floor  = max(min_tp_by_pct, min_tp_by_rr)
             if raw_tp is None or raw_tp < min_tp_floor:
                 final_tp = min_tp_floor
@@ -685,34 +604,29 @@ class PositionGuardian:
                 final_tp = raw_tp
                 tp_source = "구조적 TP"
 
-        # RR 실제값 계산 (로그용)
         if side == "long":
             actual_rr = (final_tp - mark) / (mark - new_sl) if mark - new_sl > 0 else 0
         else:
             actual_rr = (mark - final_tp) / (new_sl - mark) if new_sl - mark > 0 else 0
 
-        st["tp_price"]  = round(final_tp, 4)
+        st["tp_price"]  = final_tp
         st["tp_source"] = tp_source
         st["actual_rr"] = round(actual_rr, 2)
 
         return new_sl, st
 
     def _check_emergency_exit(self, pos):
-        # OKX가 빈 문자열을 보내는 경우 방어 처리
         try:
             margin = float(pos.get("margin", 0) or 0)
             upl    = float(pos.get("upl", 0) or 0)
         except (ValueError, TypeError):
             return False
-        if margin <= 0:
-            return False
+        if margin <= 0: return False
         loss_pct = (-upl / margin * 100) if upl < 0 else 0
         return loss_pct >= self.cfg["max_loss_pct_of_margin"]
 
     def run_once(self):
         global guardian_running
-
-        # 온/오프 체크
         if not guardian_running:
             log.info("[Guardian] 일시정지 상태 — 루프 건너뜀")
             return
@@ -735,12 +649,9 @@ class PositionGuardian:
             pos_key  = f"{inst_id}-{side}"
             symbol   = inst_id.replace("-USDT-SWAP", "")
 
-            # ── 포지션별 ON/OFF 체크 ──
-            # 기본값은 True (설정 없으면 활성)
             pos_enabled = guardian_pos_config.get(pos_key, True)
             if not pos_enabled:
                 log.info(f"  ⏸️  {symbol} {side.upper()}: Guardian OFF (사용자 설정) — 건너뜀")
-                # 스냅샷엔 포함 (모니터링은 유지)
                 try:
                     mark = float(pos.get("markPx", 0) or 0)
                     entry = float(pos.get("avgPx", 0) or 0)
@@ -767,7 +678,6 @@ class PositionGuardian:
                 log.warning(f"  {inst_id}: 캔들 데이터 부족 — 건너뜀")
                 continue
 
-            # 긴급 손절 체크 (온/오프 상관없이 항상 실행)
             if self._check_emergency_exit(pos):
                 log.warning(f"  🚨 {inst_id} {side.upper()}: 마진 대비 손실 한도 초과 — 긴급 청산!")
                 if not self.dry:
@@ -777,23 +687,21 @@ class PositionGuardian:
                     log.warning("     [DRY-RUN] 긴급 청산 생략")
                 continue
 
-            # 기존 SL/TP 조회 (캐싱)
             existing = self._get_existing_tpsl_cached(inst_id, side)
             skip_sl = self.skip_if_has_sl and existing["has_sl"]
             skip_tp = self.skip_if_has_tp and existing["has_tp"]
             algo_id = existing.get("algo_id")
 
             if skip_sl:
-                log.info(f"  ⏭️  {symbol} {side.upper()}: 기존 SL ${existing['sl_price']:,.4f} 감지 — SL 건너뜀")
+                log.info(f"  ⏭️  {symbol} {side.upper()}: 기존 수동 SL ${self.client.format_price(inst_id, existing['sl_price'])} 감지 — SL 유지")
             if skip_tp:
-                log.info(f"  ⏭️  {symbol} {side.upper()}: 기존 TP ${existing['tp_price']:,.4f} 감지 — TP 건너뜀")
+                log.info(f"  ⏭️  {symbol} {side.upper()}: 기존 수동 TP ${self.client.format_price(inst_id, existing['tp_price'])} 감지 — TP 유지")
 
-            # 둘 다 건너뛰면 스냅샷만 찍고 SL 계산 생략
             if skip_sl and skip_tp:
                 snapshot.append({
                     "symbol": symbol, "inst_id": inst_id, "side": side,
                     "sl": existing["sl_price"], "tp_price": existing["tp_price"],
-                    "sl_source": "사용자 설정 SL (유지 중)",
+                    "sl_source": "사용자 설정 수동 관리 중",
                     "trailing_active": False, "sl_dist_pct": 0, "pnl_pct": 0,
                     "leverage": pos.get("lever", "?"),
                     "unrealized_pl": pos.get("upl"),
@@ -812,43 +720,42 @@ class PositionGuardian:
 
             dir_icon   = "🟢" if side=="long" else "🔴"
             trail_note = "🔄트레일링" if st["trailing_active"] else "📐구조기반"
-            tp_str     = f"${st['tp_price']:,.4f}" if st.get("tp_price") else "—"
+            
+            # 수정한 부분 3: 출력 로그 포맷팅에 자릿수 자동 정밀도 부여
+            entry_str = self.client.format_price(inst_id, entry)
+            mark_str = self.client.format_price(inst_id, mark)
+            sl_str = self.client.format_price(inst_id, new_sl)
+            tp_str     = self.client.format_price(inst_id, st['tp_price']) if st.get("tp_price") else "—"
             rr_str     = f"RR 1:{st.get('actual_rr', 0):.2f}"
+            
             log.info(
                 f"  {dir_icon} {symbol} {side.upper()} {lever}x | "
-                f"진입:${entry:,.4f} | 현재:${mark:,.4f} | PnL:{st['pnl_pct']:+.2f}% | "
-                f"SL:${new_sl:,.4f} ({st['sl_dist_pct']:.2f}%) | TP:{tp_str} | {rr_str} | {trail_note}"
+                f"진입:${entry_str} | 현재:${mark_str} | PnL:{st['pnl_pct']:+.2f}% | "
+                f"SL:${sl_str} ({st['sl_dist_pct']:.2f}%) | TP:${tp_str} | {rr_str} | {trail_note}"
             )
             log.info(f"     SL근거: {st.get('sl_source','-')}")
             log.info(f"     TP근거: {st.get('tp_source','-')}")
-            if st.get("pattern"):
-                log.info(f"     캔들패턴: {st['pattern']}")
 
-            # SL 갱신 (0.05% 이상 변할 때만 API 호출, skip 플래그 반영)
             prev_sl = st.get("_last_applied_sl")
             should_update = prev_sl is None or abs(new_sl - prev_sl) / mark > 0.0005
 
             if should_update:
                 apply_sl = None if skip_sl else new_sl
                 apply_tp = None if skip_tp else st.get("tp_price")
-                td_mode = pos.get("mgnMode", "cross")
                 if apply_sl is None and apply_tp is None:
                     log.info(f"     → SL/TP 모두 사용자 설정 유지")
                 elif not self.dry:
-                    res = self.client.set_tpsl(inst_id, side,
-                                               sl_price=apply_sl, tp_price=apply_tp,
-                                               algo_id=algo_id)
+                    res = self.client.set_tpsl(inst_id, side, sl_price=apply_sl, tp_price=apply_tp, algo_id=algo_id)
                     if res.get("code") == "0":
                         st["_last_applied_sl"] = new_sl
-                        # 캐시 무효화 (주문 변경됨)
                         cache_key = f"{inst_id}-{side}"
                         self._algo_cache.pop(cache_key, None)
-                        log.info(f"     → SL 갱신 완료{' (TP 건너뜀)' if skip_tp else ''}")
+                        log.info(f"     → 거래소 동적 주문 동기화 완료")
                     else:
-                        log.warning(f"     → SL 갱신 실패: {res.get('msg')}")
+                        log.warning(f"     → 거래소 주문 거절 오류: {res.get('msg')}")
                 else:
                     st["_last_applied_sl"] = new_sl
-                    log.info(f"     → [DRY-RUN] SL 갱신: ${new_sl:,.4f}")
+                    log.info(f"     → [DRY-RUN] SL 갱신 시뮬레이션: ${sl_str}")
 
             snapshot.append({
                 "symbol":          symbol,
@@ -857,7 +764,7 @@ class PositionGuardian:
                 "entry":           entry,
                 "mark":            mark,
                 "pnl_pct":         st["pnl_pct"],
-                "sl":              round(new_sl, 4),
+                "sl":              new_sl,
                 "sl_dist_pct":     st["sl_dist_pct"],
                 "trailing_active": st["trailing_active"],
                 "sl_source":       st.get("sl_source", "-"),
@@ -881,23 +788,20 @@ class PositionGuardian:
         guardian_instance = self
 
         log.info("=" * 55)
-        log.info(" OKX Position Guardian 시작 (차트 구조 분석 모드)")
+        log.info(" OKX Position Guardian 가동 (안정화 버전)")
         log.info(f" 감시 모드: {'전체 포지션' if self.cfg['watch_all_positions'] else self.cfg['watch_symbols']}")
-        log.info(f" 트레일링: {self.cfg['trail_pct']}% (활성 임계 {self.cfg['trail_activate_pct']}%)")
-        log.info(f" ATR 배수: {self.cfg['atr_multiplier']}x")
-        log.info(f" 긴급청산: 마진대비 손실 {self.cfg['max_loss_pct_of_margin']}% 초과 시")
-        log.info(f" 기존SL유지: {self.skip_if_has_sl}")
-        log.info(f" DRY-RUN: {self.cfg['dry_run']}")
+        log.info(f" 트레일링 스탑: {self.cfg['trail_pct']}% (활성화: {self.cfg['trail_activate_pct']}%)")
+        log.info(f" DRY-RUN 상태: {self.cfg['dry_run']}")
         log.info("=" * 55)
 
         while True:
             try:
                 self.run_once()
             except KeyboardInterrupt:
-                log.info("Guardian 종료")
+                log.info("Guardian 수동 종료")
                 break
             except Exception as e:
-                log.error(f"루프 오류: {e}", exc_info=True)
+                log.error(f"메인 루프 치명적 오류: {e}", exc_info=True)
             time.sleep(self.cfg["poll_interval_sec"])
 
 
