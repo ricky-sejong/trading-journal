@@ -378,6 +378,26 @@ def fetch_pnl_by_ordid(date_str):
     print(f'[bills-pnl] {date_str} ordId별 실현손익 {len(pnl_map)}건 매핑')
     return pnl_map
 
+def get_prev_close_balance(date_str):
+    """전날 마감 잔고 조회 (연속성을 위해 — 전날 CLOSE = 오늘 OPEN)"""
+    prev_date = (datetime.datetime.strptime(date_str, '%Y-%m-%d') - datetime.timedelta(days=1)).strftime('%Y-%m-%d')
+    try:
+        data = db_load_journal()
+        prev = next((d for d in data if d['date'] == prev_date), None)
+        return prev['close'] if prev else None
+    except Exception:
+        return None
+
+def get_prev_swing_positions(date_str):
+    """전날 기준 스윙 보유(익일 이월) 포지션 목록 조회 — 연속 보유 표시를 위해 사용"""
+    prev_date = (datetime.datetime.strptime(date_str, '%Y-%m-%d') - datetime.timedelta(days=1)).strftime('%Y-%m-%d')
+    try:
+        data = db_load_journal()
+        prev = next((d for d in data if d['date'] == prev_date), None)
+        return prev.get('swing_positions', []) if prev else []
+    except Exception:
+        return []
+
 def fetch_okx_daily(date_str):
     start_ms = date_to_ms_kst(date_str, end=False)
     end_ms   = date_to_ms_kst(date_str, end=True)
@@ -387,112 +407,136 @@ def fetch_okx_daily(date_str):
     })
     print(f'[fills] {date_str} code={fills.get("code")} count={len(fills.get("data",[]))}')
 
-    if fills.get('code') != '0' or not fills.get('data'):
-        return None
+    has_trades = fills.get('code') == '0' and fills.get('data')
 
     total_pnl, total_fee = 0.0, 0.0
-
-    # fills-history의 pnl 필드가 비어있는 계좌/상품이 있어 bills 기준 실현손익을 보조로 사용
-    bills_pnl_map = fetch_pnl_by_ordid(date_str)
-
-    # ordId 기준으로 체결 묶기
     order_map = {}
-    for f in fills.get('data', []):
-        oid = f.get('ordId') or f.get('tradeId', str(time.time()))
-        fills_pnl = f.get('pnl')
-        # fills 자체 pnl만 우선 사용 (bills 값은 아래에서 주문 단위로 한 번만 적용)
-        pnl = float(fills_pnl) if fills_pnl is not None else 0.0
-        fee = float(f.get('fee', 0) or 0)
-        sz  = float(f.get('fillSz', 0) or 0)   # OKX fills-history는 'fillSz' 필드 사용 (sz 아님)
-        px  = float(f.get('fillPx', 0) or 0)
-        total_fee += fee
-        if oid not in order_map:
-            order_map[oid] = {
-                'time':     datetime.datetime.fromtimestamp(int(f['ts'])/1000, tz=KST).strftime('%H:%M:%S'),
-                'inst':     f.get('instId','').replace('-USDT-SWAP',''),
-                'side':     f.get('side',''),
-                'pos_side': f.get('posSide',''),
-                'sz': sz, 'price': px, 'pnl': pnl, 'fee': fee, 'fills_count': 1, 'ord_id': oid,
-            }
-        else:
-            o = order_map[oid]
-            total_sz = o['sz'] + sz
-            if total_sz > 0:
-                o['price'] = (o['price'] * o['sz'] + px * sz) / total_sz
-            o['sz'] += sz; o['pnl'] += pnl; o['fee'] += fee; o['fills_count'] += 1
-
-    # 주문(ordId) 단위로 bills 손익을 "한 번만" 덮어쓰기 (fills pnl이 비어있는 경우에만)
-    for oid, o in order_map.items():
-        if o['pnl'] == 0 and oid in bills_pnl_map:
-            o['pnl'] = bills_pnl_map[oid]
-
-    total_pnl = sum(o['pnl'] for o in order_map.values())
-
-    orders = sorted(order_map.values(), key=lambda x: x['time'])
-    trade_count = len(orders)
-
-    # 진입/청산 페어 매칭
-    open_orders = {}
     closed_pairs = []
     swing_positions = []
+    trades = []
+    trade_count = 0
 
-    for o in orders:
-        key = o['inst'] + '-' + o['pos_side']
-        is_open = (o['pos_side'] == 'long' and o['side'] == 'buy') or                   (o['pos_side'] == 'short' and o['side'] == 'sell')
-        if is_open:
-            open_orders.setdefault(key, []).append(o)
-        else:
-            if open_orders.get(key):
-                op = open_orders[key].pop(0)
-                closed_pairs.append({
-                    'inst': o['inst'], 'pos_side': o['pos_side'],
-                    'open_time': op['time'], 'close_time': o['time'],
-                    'open_price': round(op['price'], 4), 'close_price': round(o['price'], 4),
-                    'sz': round(o['sz'], 6),
-                    'pnl': round(op['pnl'] + o['pnl'], 4), 'fee': round(op['fee'] + o['fee'], 4),
-                    'type': 'scalp',
-                })
+    if has_trades:
+        # fills-history의 pnl 필드가 비어있는 계좌/상품이 있어 bills 기준 실현손익을 보조로 사용
+        bills_pnl_map = fetch_pnl_by_ordid(date_str)
+
+        # ordId 기준으로 체결 묶기
+        for f in fills.get('data', []):
+            oid = f.get('ordId') or f.get('tradeId', str(time.time()))
+            fills_pnl = f.get('pnl')
+            pnl = float(fills_pnl) if fills_pnl is not None else 0.0
+            fee = float(f.get('fee', 0) or 0)
+            sz  = float(f.get('fillSz', 0) or 0)
+            px  = float(f.get('fillPx', 0) or 0)
+            total_fee += fee
+            if oid not in order_map:
+                order_map[oid] = {
+                    'time':     datetime.datetime.fromtimestamp(int(f['ts'])/1000, tz=KST).strftime('%H:%M:%S'),
+                    'inst':     f.get('instId','').replace('-USDT-SWAP',''),
+                    'side':     f.get('side',''),
+                    'pos_side': f.get('posSide',''),
+                    'sz': sz, 'price': px, 'pnl': pnl, 'fee': fee, 'fills_count': 1, 'ord_id': oid,
+                }
             else:
-                closed_pairs.append({
-                    'inst': o['inst'], 'pos_side': o['pos_side'],
-                    'open_time': '이전날', 'close_time': o['time'],
-                    'open_price': None, 'close_price': round(o['price'], 4),
-                    'sz': round(o['sz'], 6),
-                    'pnl': round(o['pnl'], 4), 'fee': round(o['fee'], 4),
-                    'type': 'swing_close',
+                o = order_map[oid]
+                total_sz = o['sz'] + sz
+                if total_sz > 0:
+                    o['price'] = (o['price'] * o['sz'] + px * sz) / total_sz
+                o['sz'] += sz; o['pnl'] += pnl; o['fee'] += fee; o['fills_count'] += 1
+
+        for oid, o in order_map.items():
+            if o['pnl'] == 0 and oid in bills_pnl_map:
+                o['pnl'] = bills_pnl_map[oid]
+
+        total_pnl = sum(o['pnl'] for o in order_map.values())
+        orders = sorted(order_map.values(), key=lambda x: x['time'])
+        trade_count = len(orders)
+
+        open_orders = {}
+        for o in orders:
+            key = o['inst'] + '-' + o['pos_side']
+            is_open = (o['pos_side'] == 'long' and o['side'] == 'buy') or \
+                      (o['pos_side'] == 'short' and o['side'] == 'sell')
+            if is_open:
+                open_orders.setdefault(key, []).append(o)
+            else:
+                if open_orders.get(key):
+                    op = open_orders[key].pop(0)
+                    closed_pairs.append({
+                        'inst': o['inst'], 'pos_side': o['pos_side'],
+                        'open_time': op['time'], 'close_time': o['time'],
+                        'open_price': round(op['price'], 4), 'close_price': round(o['price'], 4),
+                        'sz': round(o['sz'], 6),
+                        'pnl': round(op['pnl'] + o['pnl'], 4), 'fee': round(op['fee'] + o['fee'], 4),
+                        'type': 'scalp',
+                    })
+                else:
+                    closed_pairs.append({
+                        'inst': o['inst'], 'pos_side': o['pos_side'],
+                        'open_time': '이전날', 'close_time': o['time'],
+                        'open_price': None, 'close_price': round(o['price'], 4),
+                        'sz': round(o['sz'], 6),
+                        'pnl': round(o['pnl'], 4), 'fee': round(o['fee'], 4),
+                        'type': 'swing_close',
+                    })
+
+        for key, ops in open_orders.items():
+            for op in ops:
+                swing_positions.append({
+                    'inst': op['inst'], 'pos_side': op['pos_side'],
+                    'open_time': op['time'], 'open_price': round(op['price'], 4),
+                    'sz': round(op['sz'], 6), 'type': 'swing_open',
                 })
 
-    for key, ops in open_orders.items():
-        for op in ops:
-            swing_positions.append({
-                'inst': op['inst'], 'pos_side': op['pos_side'],
-                'open_time': op['time'], 'open_price': round(op['price'], 4),
-                'sz': round(op['sz'], 6), 'type': 'swing_open',
-            })
+        trades = [{
+            'time': o['time'], 'inst': o['inst'], 'side': o['side'], 'pos_side': o['pos_side'],
+            'sz': str(round(o['sz'], 6)), 'price': str(round(o['price'], 4)),
+            'pnl': round(o['pnl'], 4), 'fee': round(o['fee'], 4), 'fills': o['fills_count'],
+        } for o in orders]
 
-    trades = [{
-        'time': o['time'], 'inst': o['inst'], 'side': o['side'], 'pos_side': o['pos_side'],
-        'sz': str(round(o['sz'], 6)), 'price': str(round(o['price'], 4)),
-        'pnl': round(o['pnl'], 4), 'fee': round(o['fee'], 4), 'fills': o['fills_count'],
-    } for o in orders]
+    # ── 전날 스윙 보유 포지션 이월 병합 ──
+    # 오늘 청산(swing_close)된 것은 제외하고, 나머지는 오늘도 계속 보유 중인 것으로 표시
+    prev_swings = get_prev_swing_positions(date_str)
+    if prev_swings:
+        closed_today_keys = {
+            (p['inst'], p['pos_side']) for p in closed_pairs if p['type'] == 'swing_close'
+        }
+        today_new_keys = {(p['inst'], p['pos_side']) for p in swing_positions}
+        for ps in prev_swings:
+            key = (ps['inst'], ps['pos_side'])
+            if key in closed_today_keys:
+                continue  # 오늘 청산됨 — 더 이상 보유 아님
+            if key in today_new_keys:
+                continue  # 오늘 새로 잡은 것과 중복 (이미 swing_positions에 있음)
+            carried = dict(ps)
+            carried['type'] = 'swing_carry'  # 이전부터 계속 보유 중임을 표시
+            swing_positions.append(carried)
 
+    # ── 잔고 계산 (거래 유무와 무관하게 항상 계산) ──
     open_bal, close_bal = fetch_day_balances(date_str)
+
     if open_bal is None:
-        bal_r = okx_request('/api/v5/account/balance', {'ccy': 'USDT'})
-        current_bal = 0.0
-        if bal_r.get('code') == '0':
-            try:
-                item = next((d for d in bal_r['data'][0]['details'] if d['ccy'] == 'USDT'), None)
-                current_bal = float(item['eq']) if item else 0.0
-            except Exception: pass
-        balance_net = total_pnl + total_fee
-        open_bal  = round(current_bal - balance_net, 2)
-        close_bal = round(current_bal, 2)
+        # bills에도 아무 기록이 없는 날 (진짜 아무 일도 없었던 날)
+        # → 전날 마감 잔고를 그대로 이어받아 연속성 유지 (전날 CLOSE = 오늘 OPEN = 오늘 CLOSE)
+        prev_close = get_prev_close_balance(date_str)
+        if prev_close is not None:
+            open_bal = close_bal = prev_close
+            balance_net = 0.0
+        else:
+            # 첫 기록이라 전날 데이터도 없으면 현재 실계좌 잔고로 폴백
+            bal_r = okx_request('/api/v5/account/balance', {'ccy': 'USDT'})
+            current_bal = 0.0
+            if bal_r.get('code') == '0':
+                try:
+                    item = next((d for d in bal_r['data'][0]['details'] if d['ccy'] == 'USDT'), None)
+                    current_bal = float(item['eq']) if item else 0.0
+                except Exception: pass
+            open_bal = close_bal = round(current_bal, 2)
+            balance_net = 0.0
     else:
         balance_net = round(close_bal - open_bal, 2)
 
     # 실제 거래 손익 (포지션 페어 합계) — 화면에 보이는 POSITIONS 합과 항상 일치하도록
-    # 잔고 증감(balance_net)은 입출금/펀딩비 등에 영향받아 왜곡될 수 있어 참고용으로만 사용
     realized_pnl = round(sum(p['pnl'] for p in closed_pairs), 2)
     net = realized_pnl
 
@@ -502,6 +546,9 @@ def fetch_okx_daily(date_str):
     n_swing_c = len([p for p in closed_pairs if p['type']=='swing_close'])
     n_swing_o = len(swing_positions)
 
+    memo = (f'주문 {trade_count}회 (단타:{n_scalp} 스윙청산:{n_swing_c} 스윙보유:{n_swing_o})'
+            if has_trades else '거래 없음 (포지션 보유 중일 수 있음)')
+
     return {
         'id': int(time.time()*1000), 'date': date_str,
         'open': open_bal, 'close': close_bal, 'pnl': pnl_pct,
@@ -510,10 +557,10 @@ def fetch_okx_daily(date_str):
         'closed_pairs': closed_pairs,
         'swing_positions': swing_positions,
         'pos': swing_summary,
-        'memo': f'주문 {trade_count}회 (단타:{n_scalp} 스윙청산:{n_swing_c} 스윙보유:{n_swing_o})',
+        'memo': memo,
         'pnl_usdt': round(net, 2), 'pnl_pct': pnl_pct,
         'open_bal': open_bal, 'close_bal': close_bal,
-        'balance_net': round(balance_net, 2),  # 참고용: 실제 잔고 증감분
+        'balance_net': round(balance_net, 2),
     }
 # ── 자동 저장 ────────────────────────────────────────────
 def auto_sync_date(date_str, respect_manual=True, force_manual_flag=None):
@@ -533,16 +580,20 @@ def auto_sync_date(date_str, respect_manual=True, force_manual_flag=None):
     return False
 
 def backfill(days=7, force=False):
-    """자동/백그라운드 백필 — 항상 수동 수정된 날짜는 보호(respect_manual=True)"""
+    """자동/백그라운드 백필 — 항상 수동 수정된 날짜는 보호(respect_manual=True)
+    잔고 연속성(전날 CLOSE=오늘 OPEN)을 위해 과거 → 최신 순으로 처리"""
     try:
         existing = {d['date'] for d in db_load_journal()}
-        for i in range(0, days+1):
-            d = (datetime.datetime.now(tz=KST) - datetime.timedelta(days=i)).strftime('%Y-%m-%d')
+        date_list = [
+            (datetime.datetime.now(tz=KST) - datetime.timedelta(days=i)).strftime('%Y-%m-%d')
+            for i in range(0, days+1)
+        ]
+        for d in reversed(date_list):  # 과거 날짜부터 처리
             if force or d not in existing:
                 auto_sync_date(d, respect_manual=True)
                 time.sleep(0.5)
             elif d == today_kst():
-                # 오늘은 항상 최신으로 갱신 (오늘은 아직 수동 수정 안 했을 가능성이 높음, 그래도 보호는 유지)
+                # 오늘은 항상 최신으로 갱신
                 auto_sync_date(d, respect_manual=True)
                 time.sleep(0.5)
     except Exception as e:

@@ -688,12 +688,15 @@ function refreshToday(){
           pairHtml += '<div style="font-family:var(--mono);font-size:9px;color:var(--yellow);letter-spacing:.1em;padding:8px 12px 4px;border-bottom:1px solid var(--border)">SWING HOLDING → NEXT DAY</div>';
           pairHtml += swings.map(function(s){
             var sc=s.pos_side==='long'?'long':'short';
+            var isCarry=s.type==='swing_carry';
+            var label=isCarry?'🔗 계속 보유 중':'📌 익일 보유';
+            var entryLabel=isCarry?'이전 진입 ':'진입 ';
             return '<div class="trade-row" style="background:rgba(245,197,24,.04);border-left:2px solid var(--yellow);margin:2px 0">'+
               '<span class="t-time" style="min-width:58px">'+(s.open_time||'—')+'</span>'+
               '<span class="t-side '+sc+'">'+(sc==='long'?'LONG':'SHORT')+'</span>'+
               '<span class="t-inst">'+s.inst+'</span>'+
-              '<span style="font-family:var(--mono);font-size:10px;color:var(--muted2)">진입 '+s.open_price.toLocaleString()+' | 수량 '+s.sz+'</span>'+
-              '<span style="font-family:var(--mono);font-size:10px;color:var(--yellow);margin-left:auto">📌 익일 보유</span>'+
+              '<span style="font-family:var(--mono);font-size:10px;color:var(--muted2)">'+entryLabel+s.open_price.toLocaleString()+' | 수량 '+s.sz+'</span>'+
+              '<span style="font-family:var(--mono);font-size:10px;color:var(--yellow);margin-left:auto">'+label+'</span>'+
             '</div>';
           }).join('');
         }
@@ -939,12 +942,15 @@ function openDayModal(id){
       '<div style="background:rgba(245,197,24,.06);border:1px solid rgba(245,197,24,.3);margin-bottom:8px">'+
       swings.map(function(s){
         var sc=s.pos_side==='long'?'long':'short';
+        var isCarry=s.type==='swing_carry';
+        var label=isCarry?'🔗 계속보유':'📌 익일';
+        var entryLabel=isCarry?'이전 진입 ':'진입 ';
         return '<div class="trade-row">'+
           '<span class="t-time" style="min-width:58px">'+(s.open_time||'—')+'</span>'+
           '<span class="t-side '+sc+'">'+(sc==='long'?'LONG':'SHORT')+'</span>'+
           '<span class="t-inst">'+s.inst+'</span>'+
-          '<span style="font-family:var(--mono);font-size:10px;color:var(--muted2)">진입 '+s.open_price.toLocaleString()+' | 수량 '+s.sz+'</span>'+
-          '<span style="margin-left:auto;font-family:var(--mono);font-size:10px;color:var(--yellow)">📌 익일</span>'+
+          '<span style="font-family:var(--mono);font-size:10px;color:var(--muted2)">'+entryLabel+s.open_price.toLocaleString()+' | 수량 '+s.sz+'</span>'+
+          '<span style="margin-left:auto;font-family:var(--mono);font-size:10px;color:var(--yellow)">'+label+'</span>'+
         '</div>';
       }).join('')+'</div>';
   }
