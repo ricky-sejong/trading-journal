@@ -59,6 +59,9 @@ def init_db():
                     ALTER TABLE journal ADD COLUMN IF NOT EXISTS swing_positions JSONB DEFAULT '[]'
                 """)
                 cur.execute("""
+                    ALTER TABLE journal ADD COLUMN IF NOT EXISTS manual_edit BOOLEAN DEFAULT FALSE
+                """)
+                cur.execute("""
                     CREATE TABLE IF NOT EXISTS settings (
                         key   TEXT PRIMARY KEY,
                         value TEXT NOT NULL
@@ -119,35 +122,82 @@ def db_load_journal():
         'trade_count':      r['trade_count'] or 0,
         'closed_pairs':     r.get('closed_pairs') if r.get('closed_pairs') else [],
         'swing_positions':  r.get('swing_positions') if r.get('swing_positions') else [],
+        'manual_edit':      bool(r.get('manual_edit')),
     } for r in rows]
 
-def db_upsert(entry):
+def is_manual_edit(date_str):
+    """해당 날짜가 사용자에 의해 수동 수정됐는지 확인"""
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT manual_edit FROM journal WHERE date=%s", (date_str,))
+                row = cur.fetchone()
+        return bool(row[0]) if row else False
+    except Exception:
+        return False
+
+def db_upsert(entry, respect_manual=True, force_manual_flag=None):
+    """
+    entry를 DB에 저장.
+    respect_manual=True: 해당 날짜가 이미 manual_edit=True면 저장을 건너뜀 (자동 동기화용)
+    force_manual_flag: True/False로 지정 시 manual_edit 값을 명시적으로 설정 (None이면 기존 값 유지)
+    """
+    date_str = entry['date']
+
+    if respect_manual and is_manual_edit(date_str):
+        print(f'[DB] {date_str}는 수동 수정됨 — 자동 동기화 건너뜀')
+        return False
+
     with get_db() as conn:
         with conn.cursor() as cur:
-            cur.execute("""
-                INSERT INTO journal (id, date, open_bal, close_bal, pnl, pos, memo, trades, trade_count,
-                                      closed_pairs, swing_positions, updated_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
-                ON CONFLICT (date) DO UPDATE SET
-                    open_bal=EXCLUDED.open_bal, close_bal=EXCLUDED.close_bal,
-                    pnl=EXCLUDED.pnl, pos=EXCLUDED.pos, memo=EXCLUDED.memo,
-                    trades=EXCLUDED.trades, trade_count=EXCLUDED.trade_count,
-                    closed_pairs=EXCLUDED.closed_pairs, swing_positions=EXCLUDED.swing_positions,
-                    updated_at=NOW()
-            """, (
-                entry.get('id', int(time.time()*1000)), entry['date'],
-                entry.get('open',0), entry.get('close',0), entry.get('pnl',0),
-                entry.get('pos',''), entry.get('memo',''),
-                json.dumps(entry.get('trades',[])), entry.get('trade_count',0),
-                json.dumps(entry.get('closed_pairs',[])), json.dumps(entry.get('swing_positions',[])),
-            ))
+            if force_manual_flag is None:
+                # manual_edit 값은 그대로 유지 (최초 생성 시에만 FALSE로)
+                cur.execute("""
+                    INSERT INTO journal (id, date, open_bal, close_bal, pnl, pos, memo, trades, trade_count,
+                                          closed_pairs, swing_positions, manual_edit, updated_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, FALSE, NOW())
+                    ON CONFLICT (date) DO UPDATE SET
+                        open_bal=EXCLUDED.open_bal, close_bal=EXCLUDED.close_bal,
+                        pnl=EXCLUDED.pnl, pos=EXCLUDED.pos, memo=EXCLUDED.memo,
+                        trades=EXCLUDED.trades, trade_count=EXCLUDED.trade_count,
+                        closed_pairs=EXCLUDED.closed_pairs, swing_positions=EXCLUDED.swing_positions,
+                        updated_at=NOW()
+                """, (
+                    entry.get('id', int(time.time()*1000)), date_str,
+                    entry.get('open',0), entry.get('close',0), entry.get('pnl',0),
+                    entry.get('pos',''), entry.get('memo',''),
+                    json.dumps(entry.get('trades',[])), entry.get('trade_count',0),
+                    json.dumps(entry.get('closed_pairs',[])), json.dumps(entry.get('swing_positions',[])),
+                ))
+            else:
+                cur.execute("""
+                    INSERT INTO journal (id, date, open_bal, close_bal, pnl, pos, memo, trades, trade_count,
+                                          closed_pairs, swing_positions, manual_edit, updated_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                    ON CONFLICT (date) DO UPDATE SET
+                        open_bal=EXCLUDED.open_bal, close_bal=EXCLUDED.close_bal,
+                        pnl=EXCLUDED.pnl, pos=EXCLUDED.pos, memo=EXCLUDED.memo,
+                        trades=EXCLUDED.trades, trade_count=EXCLUDED.trade_count,
+                        closed_pairs=EXCLUDED.closed_pairs, swing_positions=EXCLUDED.swing_positions,
+                        manual_edit=EXCLUDED.manual_edit,
+                        updated_at=NOW()
+                """, (
+                    entry.get('id', int(time.time()*1000)), date_str,
+                    entry.get('open',0), entry.get('close',0), entry.get('pnl',0),
+                    entry.get('pos',''), entry.get('memo',''),
+                    json.dumps(entry.get('trades',[])), entry.get('trade_count',0),
+                    json.dumps(entry.get('closed_pairs',[])), json.dumps(entry.get('swing_positions',[])),
+                    force_manual_flag,
+                ))
         conn.commit()
+    return True
 
 def db_update(entry_id, fields):
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute("""
-                UPDATE journal SET open_bal=%s, close_bal=%s, pnl=%s, pos=%s, memo=%s, updated_at=NOW()
+                UPDATE journal SET open_bal=%s, close_bal=%s, pnl=%s, pos=%s, memo=%s,
+                                    manual_edit=TRUE, updated_at=NOW()
                 WHERE id=%s
             """, (fields.get('open'), fields.get('close'), fields.get('pnl'),
                   fields.get('pos',''), fields.get('memo',''), entry_id))
@@ -457,39 +507,46 @@ def fetch_okx_daily(date_str):
         'balance_net': round(balance_net, 2),  # 참고용: 실제 잔고 증감분
     }
 # ── 자동 저장 ────────────────────────────────────────────
-def auto_sync_date(date_str):
-    print(f'[sync] {date_str} 동기화 중...')
+def auto_sync_date(date_str, respect_manual=True, force_manual_flag=None):
+    """
+    respect_manual=True: 수동 수정된 날짜는 건너뜀 (자동/백그라운드 동기화용 기본값)
+    respect_manual=False: 무조건 덮어씀 (사용자가 직접 RESYNC 버튼 눌렀을 때만 사용)
+    force_manual_flag: 저장 후 manual_edit 값을 명시적으로 지정 (RESYNC 시 False로 리셋)
+    """
+    print(f'[sync] {date_str} 동기화 중... (respect_manual={respect_manual})')
     entry = fetch_okx_daily(date_str)
     if entry:
-        db_upsert(entry)
-        print(f'[sync] {date_str} 저장 완료 (거래 {entry["trade_count"]}회)')
-        return True
+        saved = db_upsert(entry, respect_manual=respect_manual, force_manual_flag=force_manual_flag)
+        if saved:
+            print(f'[sync] {date_str} 저장 완료 (거래 {entry["trade_count"]}회)')
+        return saved
     print(f'[sync] {date_str} 거래 없음')
     return False
 
 def backfill(days=7, force=False):
+    """자동/백그라운드 백필 — 항상 수동 수정된 날짜는 보호(respect_manual=True)"""
     try:
         existing = {d['date'] for d in db_load_journal()}
         for i in range(0, days+1):
             d = (datetime.datetime.now(tz=KST) - datetime.timedelta(days=i)).strftime('%Y-%m-%d')
             if force or d not in existing:
-                auto_sync_date(d)
+                auto_sync_date(d, respect_manual=True)
                 time.sleep(0.5)
             elif d == today_kst():
-                # 오늘은 항상 최신으로 갱신
-                auto_sync_date(d)
+                # 오늘은 항상 최신으로 갱신 (오늘은 아직 수동 수정 안 했을 가능성이 높음, 그래도 보호는 유지)
+                auto_sync_date(d, respect_manual=True)
                 time.sleep(0.5)
     except Exception as e:
         print(f'[backfill] error: {e}')
 
 def midnight_job():
     print(f'[scheduler] 자정 자동 저장: {yesterday_kst()}')
-    auto_sync_date(yesterday_kst())
+    auto_sync_date(yesterday_kst(), respect_manual=True)
 
 def today_job():
-    """오늘 데이터 30분마다 갱신"""
+    """오늘 데이터 30분마다 갱신 (자동 — 수동 수정 보호)"""
     print(f'[scheduler] 오늘 데이터 갱신: {today_kst()}')
-    auto_sync_date(today_kst())
+    auto_sync_date(today_kst(), respect_manual=True)
 
 # ── 초기화 (순서 중요: DB 먼저, 그 다음 스케줄러) ──────────
 db_ok = init_db()
@@ -619,8 +676,10 @@ def get_daily():
 
 @app.route('/api/sync', methods=['POST'])
 def sync_date():
+    """RESYNC 버튼 — 사용자가 직접 요청한 재동기화이므로 수동수정 보호를 무시하고 강제 갱신,
+    이후 manual_edit는 False로 리셋해서 다시 자동 동기화 대상이 되게 함"""
     date_str = (request.json or {}).get('date', yesterday_kst())
-    ok = auto_sync_date(date_str)
+    ok = auto_sync_date(date_str, respect_manual=False, force_manual_flag=False)
     data = db_load_journal()
     entry = next((d for d in data if d['date'] == date_str), None)
     return jsonify({'ok': ok, 'entry': entry})

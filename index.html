@@ -902,7 +902,7 @@ function openDayModal(id){
   var entry=journalData.find(function(d){return d.id===id;});
   if(!entry)return;
   var amt=Math.round(entry.close-entry.open),pnl=entry.pnl||0;
-  document.getElementById('day-modal-date').textContent=fd(entry.date)+' — DAILY SUMMARY';
+  document.getElementById('day-modal-date').textContent=fd(entry.date)+' — DAILY SUMMARY'+(entry.manual_edit?' 🔒 수동수정됨':'');
   document.getElementById('day-stats').innerHTML=
     '<div class="day-stat"><div class="day-stat-label">RETURN</div><div class="day-stat-val" style="color:'+clr(pnl)+'">'+sg(pnl)+pnl.toFixed(2)+'%</div></div>'+
     '<div class="day-stat"><div class="day-stat-label">PNL</div><div class="day-stat-val" style="color:'+clr(amt)+'">'+sg(amt)+fn(Math.abs(amt))+' USDT</div></div>'+
@@ -972,6 +972,10 @@ function closeDayModal(){document.getElementById('day-modal').classList.remove('
 document.getElementById('day-modal').addEventListener('click',function(e){if(e.target===this)closeDayModal();});
 
 function resyncDay(dateStr){
+  var entry=journalData.find(function(e){return e.date===dateStr;});
+  if(entry&&entry.manual_edit){
+    if(!confirm('이 날짜는 직접 수정한 기록이에요.\nOKX에서 다시 불러오면 수정한 내용이 사라져요.\n계속할까요?'))return;
+  }
   var btn=event.target;
   btn.textContent='SYNCING...';
   btn.disabled=true;
