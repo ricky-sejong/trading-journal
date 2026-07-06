@@ -426,11 +426,16 @@ def fetch_okx_daily(date_str):
                 item = next((d for d in bal_r['data'][0]['details'] if d['ccy'] == 'USDT'), None)
                 current_bal = float(item['eq']) if item else 0.0
             except Exception: pass
-        net = total_pnl + total_fee
-        open_bal  = round(current_bal - net, 2)
+        balance_net = total_pnl + total_fee
+        open_bal  = round(current_bal - balance_net, 2)
         close_bal = round(current_bal, 2)
     else:
-        net = round(close_bal - open_bal, 2)
+        balance_net = round(close_bal - open_bal, 2)
+
+    # 실제 거래 손익 (포지션 페어 합계) — 화면에 보이는 POSITIONS 합과 항상 일치하도록
+    # 잔고 증감(balance_net)은 입출금/펀딩비 등에 영향받아 왜곡될 수 있어 참고용으로만 사용
+    realized_pnl = round(sum(p['pnl'] for p in closed_pairs), 2)
+    net = realized_pnl
 
     pnl_pct = round((net / open_bal * 100) if open_bal else 0, 4)
     swing_summary = ', '.join([f"{p['inst']} {p['pos_side'].upper()}" for p in swing_positions])
@@ -449,6 +454,7 @@ def fetch_okx_daily(date_str):
         'memo': f'주문 {trade_count}회 (단타:{n_scalp} 스윙청산:{n_swing_c} 스윙보유:{n_swing_o})',
         'pnl_usdt': round(net, 2), 'pnl_pct': pnl_pct,
         'open_bal': open_bal, 'close_bal': close_bal,
+        'balance_net': round(balance_net, 2),  # 참고용: 실제 잔고 증감분
     }
 # ── 자동 저장 ────────────────────────────────────────────
 def auto_sync_date(date_str):
