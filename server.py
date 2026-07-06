@@ -70,6 +70,13 @@ def init_db():
                         value TEXT NOT NULL
                     )
                 """)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS position_snapshots (
+                        date        DATE PRIMARY KEY,
+                        positions   JSONB DEFAULT '[]',
+                        created_at  TIMESTAMPTZ DEFAULT NOW()
+                    )
+                """)
             conn.commit()
         print('[DB] 테이블 준비 완료')
         return True
@@ -502,23 +509,59 @@ def fetch_okx_daily(date_str):
             'pnl': round(o['pnl'], 4), 'fee': round(o['fee'], 4), 'fills': o['fills_count'],
         } for o in orders]
 
-    # ── 전날 스윙 보유 포지션 이월 병합 ──
-    # 오늘 청산(swing_close)된 것은 제외하고, 나머지는 오늘도 계속 보유 중인 것으로 표시
-    prev_swings = get_prev_swing_positions(date_str)
-    if prev_swings:
-        closed_today_keys = {
-            (p['inst'], p['pos_side']) for p in closed_pairs if p['type'] == 'swing_close'
-        }
+    # ── 스윙 보유(HOLDING) 포지션 확정 — 스냅샷을 진짜 출처로 사용 ──
+    # fills 추론(청산 짝을 못 찾음)은 "오늘 새로 열었는지"만 판단하고,
+    # "지금 실제로 얼마나 보유 중인지"는 OKX 포지션 스냅샷을 기준으로 삼는다.
+    if date_str == today_kst():
+        # 오늘 데이터면 지금 이 순간의 실시간 포지션으로 스냅샷 갱신
+        capture_position_snapshot(date_str)
+        snapshot, snapshot_date = get_position_snapshot(date_str)
+    else:
+        # 과거 날짜면 그날 밤에 저장된(혹은 가장 가까운) 스냅샷 사용
+        snapshot, snapshot_date = get_position_snapshot(date_str)
+
+    if snapshot:
+        # 오늘 새로 연 것(open_time 있음)은 그대로 두고, 스냅샷 기준으로 "실제 보유중" 포지션만 추가/보정
         today_new_keys = {(p['inst'], p['pos_side']) for p in swing_positions}
-        for ps in prev_swings:
-            key = (ps['inst'], ps['pos_side'])
-            if key in closed_today_keys:
-                continue  # 오늘 청산됨 — 더 이상 보유 아님
-            if key in today_new_keys:
-                continue  # 오늘 새로 잡은 것과 중복 (이미 swing_positions에 있음)
-            carried = dict(ps)
-            carried['type'] = 'swing_carry'  # 이전부터 계속 보유 중임을 표시
-            swing_positions.append(carried)
+        # 오늘 신규 진입한 것들의 open_time/open_price는 fills 기준값 유지
+        prev_swings = get_prev_swing_positions(date_str)
+        prev_by_key = {(p['inst'], p['pos_side']): p for p in prev_swings}
+
+        confirmed_swings = list(swing_positions)  # 오늘 신규 진입분 유지
+        for sp in snapshot:
+            inst = sp['inst'].replace('-USDT-SWAP', '')
+            key_full = (sp['inst'], sp['side'])
+            key_short = (inst, sp['side'])
+            if key_short in today_new_keys:
+                continue  # 오늘 신규 진입분과 중복 — 이미 포함됨
+            # 전날 이월 기록에 있으면 원래 진입시간/가격 유지, 없으면 스냅샷 평단가로 대체
+            prev_info = prev_by_key.get(key_short)
+            confirmed_swings.append({
+                'inst': inst,
+                'pos_side': sp['side'],
+                'open_time': prev_info['open_time'] if prev_info else '이전',
+                'open_price': prev_info['open_price'] if prev_info else sp.get('avg_px_num', 0),
+                'sz': sp['size'],
+                'type': 'swing_carry',
+            })
+        swing_positions = confirmed_swings
+        if snapshot_date and snapshot_date != date_str:
+            print(f'[snapshot] {date_str}용 스냅샷 없음 — {snapshot_date} 스냅샷으로 대체')
+    else:
+        # 스냅샷이 아예 없으면(과거 데이터, 스냅샷 기능 도입 전) 기존 fills 기반 이월 방식으로 폴백
+        prev_swings = get_prev_swing_positions(date_str)
+        if prev_swings:
+            closed_today_keys = {
+                (p['inst'], p['pos_side']) for p in closed_pairs if p['type'] == 'swing_close'
+            }
+            today_new_keys = {(p['inst'], p['pos_side']) for p in swing_positions}
+            for ps in prev_swings:
+                key = (ps['inst'], ps['pos_side'])
+                if key in closed_today_keys or key in today_new_keys:
+                    continue
+                carried = dict(ps)
+                carried['type'] = 'swing_carry'
+                swing_positions.append(carried)
 
     # ── 거래도 없고 보유 중인 포지션(이월 포함)도 없으면 완전히 조용한 날 — 기록하지 않음 ──
     if trade_count == 0 and not swing_positions:
@@ -621,6 +664,11 @@ def today_job():
     print(f'[scheduler] 오늘 데이터 갱신: {today_kst()}')
     auto_sync_date(today_kst(), respect_manual=True)
 
+def snapshot_job():
+    """자정 직전 포지션 스냅샷 캡처 (오늘 마감 시점의 실제 보유 포지션 기록)"""
+    print(f'[scheduler] 자정 전 포지션 스냅샷 캡처: {today_kst()}')
+    capture_position_snapshot(today_kst())
+
 # ── 초기화 (순서 중요: DB 먼저, 그 다음 스케줄러) ──────────
 db_ok = init_db()
 
@@ -630,10 +678,11 @@ if db_ok:
         scheduler = BackgroundScheduler(timezone=KST)
         scheduler.add_job(midnight_job, 'cron', hour=0, minute=1)
         scheduler.add_job(today_job, 'interval', minutes=30)  # 30분마다 오늘 데이터 갱신
+        scheduler.add_job(snapshot_job, 'cron', hour=23, minute=59)  # 자정 직전 포지션 스냅샷
         scheduler.start()
-        # 서버 완전 기동 후 백필 (10초 대기)
-        threading.Thread(target=lambda: (time.sleep(10), backfill(7)), daemon=True).start()
-        print('[scheduler] 스케줄러 시작 완료 (자정 저장 + 30분 갱신)')
+        # 서버 완전 기동 후 백필 (10초 대기) + 시작 시점 스냅샷 1회 캡처
+        threading.Thread(target=lambda: (time.sleep(10), capture_position_snapshot(), backfill(7)), daemon=True).start()
+        print('[scheduler] 스케줄러 시작 완료 (자정 저장 + 30분 갱신 + 23:59 스냅샷)')
     except Exception as e:
         print(f'[scheduler] 시작 실패: {e}')
 else:
@@ -784,12 +833,11 @@ def get_balance():
         print(f'[balance] parse error: {e}')
         return jsonify({'ok': False, 'msg': str(e)}), 500
 
-@app.route('/api/positions')
-def get_positions():
+def get_current_positions():
+    """OKX 실시간 오픈 포지션 목록 조회 (공용 헬퍼)"""
     result = okx_request('/api/v5/account/positions', {'instType': 'SWAP'})
-    print(f'[positions] code={result.get("code")} msg={result.get("msg","")}')
     if result.get('code') != '0':
-        return jsonify({'ok': False, 'msg': result.get('msg')}), 400
+        return None
     positions = []
     for p in result.get('data', []):
         try:
@@ -822,18 +870,75 @@ def get_positions():
             upl_pct = float(p.get('uplRatio', 0) or 0)
         except (ValueError, TypeError):
             upl_pct = 0
-        print(f'[pos] {p.get("instId")} contracts={contracts} ctVal={ct_val} ctMult={ct_mult} realSize={real_size} markPx={mark_px}')
+        try:
+            avg_px = float(p.get('avgPx', 0) or 0)
+        except (ValueError, TypeError):
+            avg_px = 0
         positions.append({
             'inst':      p.get('instId', ''),
             'side':      p.get('posSide', ''),
             'size':      size_str,
             'contracts': str(int(contracts)),
             'avg_px':    p.get('avgPx', ''),
+            'avg_px_num': avg_px,
             'mark_px':   round(mark_px, 4) if mark_px else None,
             'upl':       round(upl, 4),
             'upl_pct':   round(upl_pct * 100, 4),
             'lever':     p.get('lever', ''),
         })
+    return positions
+
+def capture_position_snapshot(date_str=None):
+    """
+    현재 OKX 오픈 포지션을 해당 날짜의 스냅샷으로 저장.
+    이월(HOLDING) 추적의 진짜 출처로 사용 — fills 추론보다 정확함.
+    """
+    date_str = date_str or today_kst()
+    positions = get_current_positions()
+    if positions is None:
+        print(f'[snapshot] {date_str} 포지션 조회 실패 — 스냅샷 저장 건너뜀')
+        return False
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO position_snapshots (date, positions, created_at)
+                    VALUES (%s, %s, NOW())
+                    ON CONFLICT (date) DO UPDATE SET positions=EXCLUDED.positions, created_at=NOW()
+                """, (date_str, json.dumps(positions)))
+            conn.commit()
+        print(f'[snapshot] {date_str} 포지션 스냅샷 저장 완료 ({len(positions)}개)')
+        return True
+    except Exception as e:
+        print(f'[snapshot] {date_str} 저장 실패: {e}')
+        return False
+
+def get_position_snapshot(date_str):
+    """해당 날짜의 포지션 스냅샷 조회. 없으면 최대 30일 전까지 거슬러 탐색."""
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                target = datetime.datetime.strptime(date_str, '%Y-%m-%d')
+                for i in range(0, 31):
+                    check_date = (target - datetime.timedelta(days=i)).strftime('%Y-%m-%d')
+                    cur.execute("SELECT positions FROM position_snapshots WHERE date=%s", (check_date,))
+                    row = cur.fetchone()
+                    if row:
+                        return row[0], check_date
+        return [], None
+    except Exception as e:
+        print(f'[snapshot] 조회 실패: {e}')
+        return [], None
+
+@app.route('/api/positions')
+def get_positions():
+    result = okx_request('/api/v5/account/positions', {'instType': 'SWAP'})
+    print(f'[positions] code={result.get("code")} msg={result.get("msg","")}')
+    if result.get('code') != '0':
+        return jsonify({'ok': False, 'msg': result.get('msg')}), 400
+    positions = get_current_positions()
+    if positions is None:
+        positions = []
     summary = ' / '.join([
         '{} {}'.format(p['inst'].replace('-USDT-SWAP',''), 'LONG' if p['side']=='long' else 'SHORT')
         for p in positions
