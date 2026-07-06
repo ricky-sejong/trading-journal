@@ -901,7 +901,7 @@ function saveEdit(){
 function openDayModal(id){
   var entry=journalData.find(function(d){return d.id===id;});
   if(!entry)return;
-  var amt=Math.round(entry.close-entry.open),pnl=entry.pnl||0;
+  var amt=entry.pnl_usdt!=null&&entry.pnl_usdt!==0?Math.round(entry.pnl_usdt):Math.round(entry.close-entry.open),pnl=entry.pnl||0;
   document.getElementById('day-modal-date').textContent=fd(entry.date)+' — DAILY SUMMARY'+(entry.manual_edit?' 🔒 수동수정됨':'');
   document.getElementById('day-stats').innerHTML=
     '<div class="day-stat"><div class="day-stat-label">RETURN</div><div class="day-stat-val" style="color:'+clr(pnl)+'">'+sg(pnl)+pnl.toFixed(2)+'%</div></div>'+
@@ -1089,7 +1089,7 @@ function renderRecent(data){
   var el=document.getElementById('recent-table');
   if(!data.length){el.innerHTML='<div class="empty">NO RECORDS YET</div>';return;}
   var rows=data.slice().reverse().slice(0,7).map(function(d){
-    var amt=Math.round(d.close-d.open);
+    var amt=d.pnl_usdt!=null&&d.pnl_usdt!==0?Math.round(d.pnl_usdt):Math.round(d.close-d.open);
     return '<tr onclick="openDayModal('+d.id+')">'+
       '<td style="color:var(--text2)">'+fd(d.date)+'</td>'+
       '<td><span class="badge '+pc(d.pnl)+'">'+sg(d.pnl)+(d.pnl||0).toFixed(2)+'%</span></td>'+
@@ -1127,7 +1127,7 @@ function renderCalendar(){
     var onclick=entry?'onclick="openDayModal('+entry.id+')"':'';
     var inner='<div class="cal-day">'+day+'</div>';
     if(entry){
-      var amt=Math.round(entry.close-entry.open),pct=entry.pnl||0;
+      var amt=entry.pnl_usdt!=null&&entry.pnl_usdt!==0?Math.round(entry.pnl_usdt):Math.round(entry.close-entry.open),pct=entry.pnl||0;
       var c2=pct>0?'pos':pct<0?'neg':'z';
       inner+='<div class="cal-pnl '+c2+'">'+sg(amt)+fn(Math.abs(amt))+'</div>';
       inner+='<div class="cal-pct '+c2+'">'+sg(pct)+pct.toFixed(1)+'%</div>';
@@ -1143,7 +1143,7 @@ function renderHistory(){
   var data=journalData,el=document.getElementById('history-table');
   if(!data.length){el.innerHTML='<div class="empty">NO RECORDS YET</div>';return;}
   var rows=data.slice().reverse().map(function(d){
-    var amt=Math.round(d.close-d.open);
+    var amt=d.pnl_usdt!=null&&d.pnl_usdt!==0?Math.round(d.pnl_usdt):Math.round(d.close-d.open);
     return '<tr>'+
       '<td style="color:var(--text2)">'+fd(d.date)+'</td>'+
       '<td><span class="badge '+pc(d.pnl)+'">'+sg(d.pnl)+(d.pnl||0).toFixed(2)+'%</span></td>'+

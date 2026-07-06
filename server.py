@@ -62,6 +62,9 @@ def init_db():
                     ALTER TABLE journal ADD COLUMN IF NOT EXISTS manual_edit BOOLEAN DEFAULT FALSE
                 """)
                 cur.execute("""
+                    ALTER TABLE journal ADD COLUMN IF NOT EXISTS pnl_usdt NUMERIC DEFAULT 0
+                """)
+                cur.execute("""
                     CREATE TABLE IF NOT EXISTS settings (
                         key   TEXT PRIMARY KEY,
                         value TEXT NOT NULL
@@ -123,6 +126,7 @@ def db_load_journal():
         'closed_pairs':     r.get('closed_pairs') if r.get('closed_pairs') else [],
         'swing_positions':  r.get('swing_positions') if r.get('swing_positions') else [],
         'manual_edit':      bool(r.get('manual_edit')),
+        'pnl_usdt':         float(r.get('pnl_usdt') or 0),
     } for r in rows]
 
 def is_manual_edit(date_str):
@@ -154,13 +158,14 @@ def db_upsert(entry, respect_manual=True, force_manual_flag=None):
                 # manual_edit 값은 그대로 유지 (최초 생성 시에만 FALSE로)
                 cur.execute("""
                     INSERT INTO journal (id, date, open_bal, close_bal, pnl, pos, memo, trades, trade_count,
-                                          closed_pairs, swing_positions, manual_edit, updated_at)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, FALSE, NOW())
+                                          closed_pairs, swing_positions, pnl_usdt, manual_edit, updated_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, FALSE, NOW())
                     ON CONFLICT (date) DO UPDATE SET
                         open_bal=EXCLUDED.open_bal, close_bal=EXCLUDED.close_bal,
                         pnl=EXCLUDED.pnl, pos=EXCLUDED.pos, memo=EXCLUDED.memo,
                         trades=EXCLUDED.trades, trade_count=EXCLUDED.trade_count,
                         closed_pairs=EXCLUDED.closed_pairs, swing_positions=EXCLUDED.swing_positions,
+                        pnl_usdt=EXCLUDED.pnl_usdt,
                         updated_at=NOW()
                 """, (
                     entry.get('id', int(time.time()*1000)), date_str,
@@ -168,17 +173,19 @@ def db_upsert(entry, respect_manual=True, force_manual_flag=None):
                     entry.get('pos',''), entry.get('memo',''),
                     json.dumps(entry.get('trades',[])), entry.get('trade_count',0),
                     json.dumps(entry.get('closed_pairs',[])), json.dumps(entry.get('swing_positions',[])),
+                    entry.get('pnl_usdt', 0),
                 ))
             else:
                 cur.execute("""
                     INSERT INTO journal (id, date, open_bal, close_bal, pnl, pos, memo, trades, trade_count,
-                                          closed_pairs, swing_positions, manual_edit, updated_at)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                                          closed_pairs, swing_positions, pnl_usdt, manual_edit, updated_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
                     ON CONFLICT (date) DO UPDATE SET
                         open_bal=EXCLUDED.open_bal, close_bal=EXCLUDED.close_bal,
                         pnl=EXCLUDED.pnl, pos=EXCLUDED.pos, memo=EXCLUDED.memo,
                         trades=EXCLUDED.trades, trade_count=EXCLUDED.trade_count,
                         closed_pairs=EXCLUDED.closed_pairs, swing_positions=EXCLUDED.swing_positions,
+                        pnl_usdt=EXCLUDED.pnl_usdt,
                         manual_edit=EXCLUDED.manual_edit,
                         updated_at=NOW()
                 """, (
@@ -187,6 +194,7 @@ def db_upsert(entry, respect_manual=True, force_manual_flag=None):
                     entry.get('pos',''), entry.get('memo',''),
                     json.dumps(entry.get('trades',[])), entry.get('trade_count',0),
                     json.dumps(entry.get('closed_pairs',[])), json.dumps(entry.get('swing_positions',[])),
+                    entry.get('pnl_usdt', 0),
                     force_manual_flag,
                 ))
         conn.commit()
@@ -197,10 +205,11 @@ def db_update(entry_id, fields):
         with conn.cursor() as cur:
             cur.execute("""
                 UPDATE journal SET open_bal=%s, close_bal=%s, pnl=%s, pos=%s, memo=%s,
-                                    manual_edit=TRUE, updated_at=NOW()
+                                    pnl_usdt=%s, manual_edit=TRUE, updated_at=NOW()
                 WHERE id=%s
             """, (fields.get('open'), fields.get('close'), fields.get('pnl'),
-                  fields.get('pos',''), fields.get('memo',''), entry_id))
+                  fields.get('pos',''), fields.get('memo',''),
+                  fields.get('pnl_usdt', 0), entry_id))
         conn.commit()
         return cur.rowcount > 0
 
@@ -659,7 +668,9 @@ def update_journal(entry_id):
     o = float(body.get('open', 0))
     c = float(body.get('close', 0))
     pnl = round((c-o)/o*100, 4) if o else 0
-    ok = db_update(entry_id, {'open':o,'close':c,'pnl':pnl,'pos':body.get('pos',''),'memo':body.get('memo','')})
+    pnl_usdt = round(c - o, 2)
+    ok = db_update(entry_id, {'open':o,'close':c,'pnl':pnl,'pos':body.get('pos',''),
+                               'memo':body.get('memo',''), 'pnl_usdt': pnl_usdt})
     return jsonify({'ok': ok})
 
 @app.route('/api/journal/<int:entry_id>', methods=['DELETE'])
