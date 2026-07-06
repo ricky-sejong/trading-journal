@@ -379,22 +379,30 @@ def fetch_pnl_by_ordid(date_str):
     return pnl_map
 
 def get_prev_close_balance(date_str):
-    """전날 마감 잔고 조회 (연속성을 위해 — 전날 CLOSE = 오늘 OPEN)"""
-    prev_date = (datetime.datetime.strptime(date_str, '%Y-%m-%d') - datetime.timedelta(days=1)).strftime('%Y-%m-%d')
+    """가장 최근의 이전 기록 마감 잔고 조회 (기록 없는 날을 건너뛰고 최대 30일 전까지 탐색)"""
     try:
         data = db_load_journal()
-        prev = next((d for d in data if d['date'] == prev_date), None)
-        return prev['close'] if prev else None
+        by_date = {d['date']: d for d in data}
+        target = datetime.datetime.strptime(date_str, '%Y-%m-%d')
+        for i in range(1, 31):
+            check_date = (target - datetime.timedelta(days=i)).strftime('%Y-%m-%d')
+            if check_date in by_date:
+                return by_date[check_date]['close']
+        return None
     except Exception:
         return None
 
 def get_prev_swing_positions(date_str):
-    """전날 기준 스윙 보유(익일 이월) 포지션 목록 조회 — 연속 보유 표시를 위해 사용"""
-    prev_date = (datetime.datetime.strptime(date_str, '%Y-%m-%d') - datetime.timedelta(days=1)).strftime('%Y-%m-%d')
+    """가장 최근의 이전 기록 기준 스윙 보유(이월) 포지션 목록 조회 (기록 없는 날 건너뛰며 탐색)"""
     try:
         data = db_load_journal()
-        prev = next((d for d in data if d['date'] == prev_date), None)
-        return prev.get('swing_positions', []) if prev else []
+        by_date = {d['date']: d for d in data}
+        target = datetime.datetime.strptime(date_str, '%Y-%m-%d')
+        for i in range(1, 31):
+            check_date = (target - datetime.timedelta(days=i)).strftime('%Y-%m-%d')
+            if check_date in by_date:
+                return by_date[check_date].get('swing_positions', [])
+        return []
     except Exception:
         return []
 
@@ -511,6 +519,11 @@ def fetch_okx_daily(date_str):
             carried = dict(ps)
             carried['type'] = 'swing_carry'  # 이전부터 계속 보유 중임을 표시
             swing_positions.append(carried)
+
+    # ── 거래도 없고 보유 중인 포지션(이월 포함)도 없으면 완전히 조용한 날 — 기록하지 않음 ──
+    if trade_count == 0 and not swing_positions:
+        print(f'[fills] {date_str}: 거래 없음 + 보유 포지션 없음 — 기록 건너뜀')
+        return None
 
     # ── 잔고 계산 (거래 유무와 무관하게 항상 계산) ──
     open_bal, close_bal = fetch_day_balances(date_str)
