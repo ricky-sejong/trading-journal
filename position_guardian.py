@@ -1143,6 +1143,25 @@ class PositionGuardian:
         loss_pct = (-upl / margin * 100) if upl < 0 else 0
         return loss_pct >= self.cfg["max_loss_pct_of_margin"]
 
+    def _cleanup_guardian_pos_flags(self, pos_keys):
+        """청산된 포지션의 guardian_pos:{key} 설정을 DB에서 삭제.
+        봇이 진입 시 꺼둔 플래그가 남으면 이후 수동 포지션까지 Guardian이 건너뛰게 됨."""
+        conn = _get_db_connection()
+        if conn is None:
+            return
+        try:
+            keys = [f"guardian_pos:{k}" for k in pos_keys]
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute("DELETE FROM settings WHERE key = ANY(%s)", (keys,))
+                    if cur.rowcount:
+                        log.info(f"  🧹 guardian_pos 플래그 {cur.rowcount}건 삭제: {pos_keys}")
+        except Exception as e:
+            log.warning(f"[DB] guardian_pos 플래그 정리 실패: {e}")
+        finally:
+            try: conn.close()
+            except Exception: pass
+
     def run_once(self):
         global guardian_running
 
@@ -1167,6 +1186,10 @@ class PositionGuardian:
             del self.state["positions"][k]
             self._algo_cache.pop(k, None)
             log.info(f"  🧹 청산된 포지션 state 정리: {k}")
+        # 봇이 꺼둔 guardian_pos 플래그도 청산 시 삭제
+        # (안 지우면 이후 같은 심볼·방향 '수동' 포지션이 Guardian 관리를 계속 못 받음)
+        if stale:
+            self._cleanup_guardian_pos_flags(stale)
 
         if not positions:
             log.info(f"[{ts}] 감시 중인 오픈 포지션 없음")
