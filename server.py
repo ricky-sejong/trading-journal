@@ -782,6 +782,8 @@ def run_entry_bot():
             db_set_setting('entry_bot_running', 'false')
         if db_get_setting('entry_bot_usdt_amount') is None:
             db_set_setting('entry_bot_usdt_amount', '50')
+        if db_get_setting('entry_bot_entry_pct') is None:
+            db_set_setting('entry_bot_entry_pct', '0')   # 0 = 고정 USDT 모드
         if db_get_setting('entry_bot_leverage') is None:
             db_set_setting('entry_bot_leverage', '25')
         print('[EntryBot] OKX 진입 봇 시작 (DB 설정으로 ON/OFF 제어)...')
@@ -1102,6 +1104,7 @@ def entry_bot_status():
         running = db_get_setting('entry_bot_running', 'false') == 'true'
         usdt_amount = float(db_get_setting('entry_bot_usdt_amount', '50') or 50)
         leverage = int(float(db_get_setting('entry_bot_leverage', '25') or 25))
+        entry_pct = float(db_get_setting('entry_bot_entry_pct', '0') or 0)
 
         state_path = 'entry_bot_state.json'
         state = {}
@@ -1114,6 +1117,7 @@ def entry_bot_status():
             'running': running,
             'usdt_amount': usdt_amount,
             'leverage': leverage,
+            'entry_pct': entry_pct,
             'symbol': latest.get('symbol', '—'),
             'phase': latest.get('phase', '—'),
             'signal': latest.get('signal'),
@@ -1147,11 +1151,18 @@ def entry_bot_config():
                 return jsonify({'ok': False, 'msg': '레버리지는 1~125 사이여야 해요.'}), 400
             db_set_setting('entry_bot_leverage', str(leverage))
             print(f'[EntryBot] 레버리지 설정: {leverage}x')
+        if 'entry_pct' in body:
+            pct = float(body['entry_pct'])
+            if pct < 0 or pct > 100:
+                return jsonify({'ok': False, 'msg': '진입 비율은 0~100% 사이여야 해요. (0 = 고정 금액 모드)'}), 400
+            db_set_setting('entry_bot_entry_pct', str(pct))
+            print(f"[EntryBot] 진입 비율 설정: {pct}% ({'복리 모드' if pct > 0 else '고정 금액 모드'})")
         return jsonify({
             'ok': True,
             'running': db_get_setting('entry_bot_running', 'false') == 'true',
             'usdt_amount': float(db_get_setting('entry_bot_usdt_amount', '50') or 50),
             'leverage': int(float(db_get_setting('entry_bot_leverage', '25') or 25)),
+            'entry_pct': float(db_get_setting('entry_bot_entry_pct', '0') or 0),
         })
     except Exception as e:
         return jsonify({'ok': False, 'msg': str(e)})

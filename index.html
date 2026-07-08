@@ -419,7 +419,11 @@ body{font-family:var(--sans);background:var(--bg);color:var(--text);min-height:1
         <span style="font-family:var(--mono);font-size:11px;color:var(--text2)" id="entrybot-status">ENTRY BOT 확인 중...</span>
       </div>
       <div style="display:flex;align-items:center;gap:6px;margin-left:auto;flex-wrap:wrap">
-        <span style="font-family:var(--mono);font-size:9px;color:var(--muted)">진입금액</span>
+        <span style="font-family:var(--mono);font-size:9px;color:var(--muted)">진입비율</span>
+        <input type="number" id="entrybot-pct" value="0" min="0" max="100" step="0.5" onchange="updateSizeModeHint()"
+               style="width:55px;font-family:var(--mono);font-size:11px;background:var(--bg3);border:1px solid var(--border2);color:var(--yellow);padding:4px 6px;outline:none">
+        <span style="font-family:var(--mono);font-size:9px;color:var(--muted)">%</span>
+        <span style="font-family:var(--mono);font-size:9px;color:var(--muted);margin-left:6px">진입금액</span>
         <input type="number" id="entrybot-amount" value="50" min="1" step="1"
                style="width:70px;font-family:var(--mono);font-size:11px;background:var(--bg3);border:1px solid var(--border2);color:var(--text);padding:4px 6px;outline:none">
         <span style="font-family:var(--mono);font-size:9px;color:var(--muted)">USDT</span>
@@ -933,6 +937,8 @@ function refreshEntryBotStatus(){
       }
       if(!entryBotAmountLoaded){
         if(d.usdt_amount)document.getElementById('entrybot-amount').value=d.usdt_amount;
+        if(d.entry_pct!==undefined)document.getElementById('entrybot-pct').value=d.entry_pct;
+        updateSizeModeHint();
         if(d.leverage)document.getElementById('entrybot-leverage').value=d.leverage;
         entryBotAmountLoaded=true;
       }
@@ -954,19 +960,29 @@ function toggleEntryBot(){
     .catch(function(){alert('설정 변경 실패');});
 }
 
+function updateSizeModeHint(){
+  var pct=parseFloat(document.getElementById('entrybot-pct').value)||0;
+  var amtEl=document.getElementById('entrybot-amount');
+  amtEl.style.opacity=pct>0?'0.35':'1';
+  amtEl.title=pct>0?'복리 모드에서는 고정 금액이 무시됩니다':'';
+}
 function saveEntryBotAmount(){
   var amount=parseFloat(document.getElementById('entrybot-amount').value);
+  var pct=parseFloat(document.getElementById('entrybot-pct').value)||0;
   var leverage=parseInt(document.getElementById('entrybot-leverage').value);
   if(isNaN(amount)||amount<=0){alert('올바른 금액을 입력해주세요.');return;}
   if(isNaN(leverage)||leverage<=0||leverage>125){alert('레버리지는 1~125 사이로 입력해주세요.');return;}
   fetch(SERVER+'/api/entrybot/config',{
     method:'POST',
     headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({usdt_amount:amount,leverage:leverage})
+    body:JSON.stringify({usdt_amount:amount,leverage:leverage,entry_pct:pct})
   }).then(function(r){return r.json();})
     .then(function(d){
       if(d.ok){
-        alert('진입 금액 '+d.usdt_amount+' USDT / 레버리지 '+d.leverage+'x로 저장됐어요.');
+        alert(d.entry_pct>0
+          ?('복리 모드: 매 진입 시드의 '+d.entry_pct+'% × '+d.leverage+'x로 저장됐어요. (고정 금액은 무시됨)')
+          :('고정 모드: 진입 금액 '+d.usdt_amount+' USDT / 레버리지 '+d.leverage+'x로 저장됐어요.'));
+        updateSizeModeHint();
       } else {
         alert('저장 실패: '+(d.msg||''));
       }

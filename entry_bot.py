@@ -212,6 +212,21 @@ class OKXClient:
             pass
         return 0.0
 
+    def get_balance_detail(self, ccy="USDT"):
+        """(cashBal, availBal) 반환.
+        cashBal = 미실현손익 제외 실제 현금 잔고 — 복리 사이징의 기준.
+        (실현된 수익만 시드에 반영; 평가이익으로 진입 금액이 부풀지 않음)"""
+        d = self._req("GET", "/api/v5/account/balance", {"ccy": ccy})
+        try:
+            for item in d["data"][0]["details"]:
+                if item["ccy"] == ccy:
+                    cash  = float(item.get("cashBal", 0) or 0)
+                    avail = float(item.get("availBal", 0) or 0)
+                    return cash, avail
+        except Exception:
+            pass
+        return 0.0, 0.0
+
     def get_positions(self, inst_id=None):
         params = {"instType": "SWAP"}
         if inst_id:
@@ -357,7 +372,7 @@ entry_bot_running  = False    # 기본값: 꺼짐 — 웹사이트에서 켜야 
 entry_bot_instance = None
 
 # ─── DB 직접 조회 (웹사이트 설정을 실시간 반영, 프로세스 간 상태 불일치 방지) ──
-_bot_config_cache = {"data": {"running": False, "usdt_amount": 50.0, "leverage": 25}, "ts": 0}
+_bot_config_cache = {"data": {"running": False, "usdt_amount": 50.0, "leverage": 25, "entry_pct": 0.0}, "ts": 0}
 _BOT_CONFIG_CACHE_SEC = 5
 
 def _get_db_connection():
@@ -389,13 +404,16 @@ def get_entry_bot_config():
     try:
         with conn:
             with conn.cursor() as cur:
-                cur.execute("SELECT key, value FROM settings WHERE key IN (%s, %s, %s)",
-                           ("entry_bot_running", "entry_bot_usdt_amount", "entry_bot_leverage"))
+                cur.execute("SELECT key, value FROM settings WHERE key IN (%s, %s, %s, %s)",
+                           ("entry_bot_running", "entry_bot_usdt_amount",
+                            "entry_bot_leverage", "entry_bot_entry_pct"))
                 rows = dict(cur.fetchall())
         result = {
             "running":     rows.get("entry_bot_running", "false") == "true",
             "usdt_amount": float(rows.get("entry_bot_usdt_amount", 50.0)),
             "leverage":    int(float(rows.get("entry_bot_leverage", 25))),
+            # entry_pct > 0 → 복리 모드 (진입 시점 시드의 %), 0 → 고정 USDT 모드
+            "entry_pct":   float(rows.get("entry_bot_entry_pct", 0.0) or 0.0),
         }
         _bot_config_cache["data"] = result
         _bot_config_cache["ts"] = now
@@ -652,18 +670,40 @@ class EntryBot:
             "ema50": round(ema50[-1], 2) if ema50[-1] else None,
         }
 
-    def _calc_size(self, sym, price, usdt_amount, leverage):
+    def _calc_margin(self, bot_cfg):
         """
-        고정 USDT 금액 + 레버리지 기준 진입 수량(계약 수) 계산.
+        이번 진입에 쓸 마진(USDT) 계산.
+        - 복리 모드 (entry_pct > 0): 진입 시점 시드(cashBal, 미실현 제외) × pct%.
+          시드가 커지면 진입 금액도 커진다. 가용잔고의 95%를 넘지 않게 캡.
+        - 고정 모드 (entry_pct = 0): 기존 동작 — usdt_amount / max_positions.
+        반환: (margin, mode_str, seed or None) / 실패 시 (None, mode_str, None)
+        """
+        pct = bot_cfg.get("entry_pct", 0.0)
+        if pct > 0:
+            seed, avail = self.client.get_balance_detail("USDT")   # seed = cashBal (미실현 제외)
+            if seed <= 0:
+                log.warning(f"시드 조회 실패 (cashBal={seed}) — 진입 생략")
+                return None, "percent", None
+            margin = seed * pct / 100.0
+            cap = avail * 0.95
+            if margin > cap:
+                log.info(f"  마진 캡 적용: 시드 {seed:.2f}×{pct}% = {margin:.2f} → 가용 {avail:.2f}의 95% = {cap:.2f}")
+                margin = cap
+            if margin <= 0:
+                log.warning("가용잔고 부족 — 진입 생략")
+                return None, "percent", seed
+            return margin, "percent", seed
+        return bot_cfg["usdt_amount"] / max(1, self.cfg["max_positions"]), "fixed", None
+
+    def _calc_size(self, sym, price, margin, leverage):
+        """
+        마진(USDT) + 레버리지 기준 진입 수량(계약 수) 계산.
         심볼별 ctVal을 조회해 정확한 계약 수를 산출. 스펙 조회 실패 시 None(진입 차단).
-        max_positions로 마진 예산을 분할해 심볼당 과노출 방지.
         """
         spec = self._get_instrument_spec(sym)
         if spec is None:
             return None
-        # 전 심볼 합산 한도 기준 마진 분할
-        margin_per_pos = usdt_amount / max(1, self.cfg["max_positions"])
-        notional = margin_per_pos * leverage
+        notional = margin * leverage
         raw_sz = notional / (price * spec["ctVal"])
         # lotSz 단위로 내림
         lot = spec["lotSz"]
@@ -841,8 +881,12 @@ class EntryBot:
                 side_okx, pos_side_okx = signal_to_okx(signal)
                 dir_icon   = "🟢 롱" if signal == "long" else "🔴 숏"
                 trail_note = " (트레일링 스탑 활성)" if is_trend and self.cfg["trailing_stop"] else ""
+                if bot_cfg.get("entry_pct", 0) > 0:
+                    size_desc = f"시드의 {bot_cfg['entry_pct']}% (복리)"
+                else:
+                    size_desc = f"{bot_cfg['usdt_amount']}USDT/{self.cfg['max_positions']}분할"
                 log.info(f"  → {dir_icon} [{sym}] 진입! "
-                         f"금액:{bot_cfg['usdt_amount']}USDT/{self.cfg['max_positions']}분할"
+                         f"마진:{size_desc}"
                          f"×{bot_cfg['leverage']}x | TP: {tp_price} ({tp_pct}%) "
                          f"| SL: {sl_price} ({sl_pct}%){trail_note}")
 
@@ -876,7 +920,14 @@ class EntryBot:
                 ord_id = None
                 signal_result = None   # 주문 실패 시 'order_failed'로 즉시 확정
                 if not self.dry:
-                    size = self._calc_size(sym, price, bot_cfg["usdt_amount"], bot_cfg["leverage"])
+                    margin, size_mode, equity = self._calc_margin(bot_cfg)
+                    signal_meta["size_mode"] = size_mode
+                    if size_mode == "percent":
+                        signal_meta["entry_pct"] = bot_cfg.get("entry_pct")
+                        signal_meta["equity"] = round(equity, 2) if equity else None
+                    if margin is not None:
+                        signal_meta["margin"] = round(margin, 2)
+                    size = self._calc_size(sym, price, margin, bot_cfg["leverage"]) if margin is not None else None
                     if size is None:
                         # 조기 return하면 신호 기록·last_signal 갱신을 건너뛰어
                         # 매 루프 같은 신호로 재시도(로그 스팸)하게 되므로 실패로 기록하고 계속 진행
