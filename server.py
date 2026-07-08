@@ -1381,6 +1381,7 @@ def _sync_signals_core():
     TOL_MS = 5 * 60 * 1000
     matched = 0
     used_hist = set()
+    diag = []   # 매칭 실패 사유 진단
 
     with get_db() as conn:
         with conn.cursor() as cur:
@@ -1388,8 +1389,11 @@ def _sync_signals_core():
                 entry_ms = int(meta.get('entry_ts', 0)) * 1000
                 side = meta.get('signal')
                 if not entry_ms or not side:
+                    diag.append({'id': sig_id, 'symbol': symbol, 'why': 'meta에 entry_ts/signal 없음 (구버전 신호)'})
                     continue
                 best = None
+                sym_hist = [h for h in history if h.get('instId') == symbol]
+                dir_hist = [h for h in sym_hist if h.get('direction') == side]
                 for i, h in enumerate(history):
                     if i in used_hist: continue
                     if h.get('instId') != symbol: continue
@@ -1401,6 +1405,18 @@ def _sync_signals_core():
                     if gap < TOL_MS and (best is None or gap < best[1]):
                         best = (i, gap)
                 if best is None:
+                    if not sym_hist:
+                        why = '이 심볼의 청산 이력 없음 → 포지션 미체결(주문실패)이거나 아직 보유 중'
+                    elif not dir_hist:
+                        why = f'심볼 이력 {len(sym_hist)}건 있으나 방향({side}) 불일치'
+                    else:
+                        gaps = []
+                        for h in dir_hist:
+                            try: gaps.append(abs(int(h.get('cTime',0)) - entry_ms))
+                            except Exception: pass
+                        min_gap_min = round(min(gaps)/60000, 1) if gaps else None
+                        why = f'방향 일치 이력 {len(dir_hist)}건 있으나 진입시각 차이 최소 {min_gap_min}분 (허용 5분 초과)'
+                    diag.append({'id': sig_id, 'symbol': symbol, 'why': why})
                     continue
                 h = history[best[0]]
                 used_hist.add(best[0])
@@ -1413,8 +1429,11 @@ def _sync_signals_core():
                             (result, pnl, sig_id))
                 matched += 1
 
-    print(f'[signals-sync] {matched}/{len(pending)}건 매칭 완료')
-    return {'ok': True, 'matched': matched, 'pending': len(pending) - matched}
+    for d in diag:
+        print(f"[signals-sync] 미매칭 #{d['id']} {d['symbol']}: {d['why']}")
+    print(f'[signals-sync] {matched}/{len(pending)}건 매칭 완료 | 이력 {len(history)}건 조회')
+    return {'ok': True, 'matched': matched, 'pending': len(pending) - matched,
+            'history_count': len(history), 'diag': diag[:20]}
 
 @app.route('/api/signals/sync', methods=['POST'])
 def sync_signal_results():

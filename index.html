@@ -484,6 +484,7 @@ body{font-family:var(--sans);background:var(--bg);color:var(--text);min-height:1
       <div class="table-label">BY HOUR (KST)</div>
       <div id="signals-by-hour"></div>
     </div>
+    <div id="signals-diag"></div>
     <div class="table-wrap">
       <div class="table-label">RECENT SIGNALS</div>
       <div id="signals-recent"></div>
@@ -1468,7 +1469,15 @@ function syncSignalResults(){
     .then(function(d){
       btn.disabled=false;btn.textContent='SYNC RESULTS';
       if(d.ok){
-        document.getElementById('signals-sub').textContent='SYNC: '+d.matched+'건 매칭'+(d.pending?', '+d.pending+'건 대기':'');
+        var msg='SYNC: '+d.matched+'건 매칭'+(d.pending?', '+d.pending+'건 미매칭':'');
+        document.getElementById('signals-sub').textContent=msg;
+        var diagEl=document.getElementById('signals-diag');
+        if(d.diag&&d.diag.length){
+          var rows=d.diag.map(function(x){return '<tr><td>#'+x.id+'</td><td>'+x.symbol.replace('-USDT-SWAP','')+'</td><td style="color:var(--yellow)">'+x.why+'</td></tr>';}).join('');
+          diagEl.innerHTML='<div class="table-wrap"><div class="table-label" style="color:var(--yellow)">미매칭 사유 (SYNC 진단 · 이력 '+(d.history_count||0)+'건 조회)</div><table class="data-table"><thead><tr><th>ID</th><th>SYM</th><th>사유</th></tr></thead><tbody>'+rows+'</tbody></table></div>';
+        }else{
+          diagEl.innerHTML='';
+        }
         loadSignalPanel();
       }else{
         document.getElementById('signals-sub').textContent='SYNC ERROR: '+(d.msg||'');
