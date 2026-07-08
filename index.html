@@ -469,6 +469,10 @@ body{font-family:var(--sans);background:var(--bg);color:var(--text);min-height:1
     <div class="metrics" id="signals-metrics"></div>
 
     <div class="table-wrap">
+      <div class="table-label">BY EXIT TYPE</div>
+      <div id="signals-by-result"></div>
+    </div>
+    <div class="table-wrap">
       <div class="table-label">BY STRATEGY</div>
       <div id="signals-by-strategy"></div>
     </div>
@@ -1388,6 +1392,8 @@ function loadSignalPanel(){
         '<div class="metric"><div class="m-label">WIN RATE</div><div class="m-val'+wrColor+'">'+wr+'</div></div>'+
         '<div class="metric"><div class="m-label">REALIZED PNL</div><div class="m-val '+sigPnlCls(t.pnl)+'">'+(t.closed?((t.pnl>=0?'+':'')+t.pnl.toFixed(2)):'—')+'</div></div>';
 
+      var EXIT_LABELS={tp:'TP 도달 ✓',sl:'SL 도달 ✗',manual:'수동/가디언 청산',liquidation:'강제청산 🚨',adl:'ADL',closed:'청산(미분류)',full_close:'청산(미분류)',partial_close:'부분청산'};
+      renderSignalAgg('signals-by-result',d.by_result,'EXIT',function(k){return EXIT_LABELS[k]||k;});
       renderSignalAgg('signals-by-strategy',d.by_strategy,'STRATEGY',function(k){return STRATEGY_LABELS[k]||k;});
       renderSignalAgg('signals-by-symbol',d.by_symbol,'SYMBOL',function(k){return k.replace('-USDT-SWAP','');});
       var hours=(d.by_hour||[]).slice().sort(function(a,b){return parseInt(a.key)-parseInt(b.key);});
@@ -1400,24 +1406,44 @@ function loadSignalPanel(){
     .then(function(d){
       var el=document.getElementById('signals-recent');
       if(!d.ok||!d.signals.length){el.innerHTML='<div style="padding:14px;font-family:var(--mono);font-size:11px;color:var(--muted)">신호 없음 — 봇이 진입하면 여기에 쌓입니다</div>';return;}
+      var fmtPx=function(v){
+        if(v===null||v===undefined||v==='')return '—';
+        var n=parseFloat(v);
+        return isNaN(n)?'—':n.toLocaleString(undefined,{maximumFractionDigits:6});
+      };
+      var RESULT_LABELS={
+        tp:'<span style="color:var(--green);font-weight:500">TP ✓</span>',
+        sl:'<span style="color:var(--red);font-weight:500">SL ✗</span>',
+        manual:'<span style="color:var(--text2)">MANUAL</span>',
+        liquidation:'<span style="color:var(--red);font-weight:600">LIQ 🚨</span>',
+        adl:'<span style="color:var(--red)">ADL</span>',
+        closed:'<span style="color:var(--text2)">CLOSED</span>',
+        full_close:'<span style="color:var(--text2)">CLOSED</span>',
+        partial_close:'<span style="color:var(--text2)">PARTIAL</span>'
+      };
       var body=d.signals.map(function(s){
         var m=s.meta||{};
         var dirColor=m.signal==='long'?'var(--green)':'var(--red)';
         var dirLabel=m.signal==='long'?'LONG':'SHORT';
-        var result=s.result?s.result.toUpperCase():(m.dry_run?'<span style="color:var(--muted)">DRY</span>':'<span style="color:var(--yellow)">OPEN</span>');
+        var result;
+        if(s.result){
+          result=RESULT_LABELS[s.result]||s.result.toUpperCase();
+        }else{
+          result=m.dry_run?'<span style="color:var(--muted)">DRY</span>':'<span style="color:var(--yellow)">OPEN</span>';
+        }
         return '<tr>'+
           '<td style="white-space:nowrap">'+s.created_at.slice(5,16)+'</td>'+
           '<td>'+s.symbol.replace('-USDT-SWAP','')+'</td>'+
           '<td style="color:'+dirColor+'">'+dirLabel+'</td>'+
           '<td>'+(STRATEGY_LABELS[m.strategy]||m.strategy||'—')+'</td>'+
-          '<td>'+(m.regime||'—')+'</td>'+
-          '<td>'+(m.atr_pct!=null?m.atr_pct+'%':'—')+'</td>'+
-          '<td>'+(m.volume_ratio!=null?m.volume_ratio+'x':'—')+'</td>'+
+          '<td>'+fmtPx(m.price)+'</td>'+
+          '<td style="color:var(--green)">'+fmtPx(m.tp_price)+(m.tp_pct!=null?' <span style="color:var(--muted);font-size:10px">+'+m.tp_pct+'%</span>':'')+'</td>'+
+          '<td style="color:var(--red)">'+fmtPx(m.sl_price)+(m.sl_pct!=null?' <span style="color:var(--muted);font-size:10px">-'+m.sl_pct+'%</span>':'')+'</td>'+
           '<td>'+result+'</td>'+
           '<td>'+sigFmtPnl(s.pnl_usdt)+'</td>'+
         '</tr>';
       }).join('');
-      el.innerHTML='<table class="data-table"><thead><tr><th>TIME</th><th>SYM</th><th>SIDE</th><th>STRATEGY</th><th>REGIME</th><th>ATR</th><th>VOL</th><th>RESULT</th><th>PNL</th></tr></thead><tbody>'+body+'</tbody></table>';
+      el.innerHTML='<table class="data-table"><thead><tr><th>TIME</th><th>SYM</th><th>SIDE</th><th>STRATEGY</th><th>ENTRY</th><th>TP</th><th>SL</th><th>RESULT</th><th>PNL</th></tr></thead><tbody>'+body+'</tbody></table>';
     })
     .catch(function(){});
 }

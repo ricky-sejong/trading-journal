@@ -699,6 +699,15 @@ def snapshot_job():
     print(f'[scheduler] 자정 전 포지션 스냅샷 캡처: {today_kst()}')
     capture_position_snapshot(today_kst())
 
+def signals_sync_job():
+    """봇 신호 청산 결과 자동 동기화 (30분마다 — 수동 SYNC 버튼과 동일 로직)"""
+    try:
+        r = _sync_signals_core()
+        if r.get('matched'):
+            print(f"[scheduler] 신호 결과 자동 동기화: {r['matched']}건 매칭")
+    except Exception as e:
+        print(f'[scheduler] 신호 동기화 실패: {e}')
+
 # ── 초기화 (순서 중요: DB 먼저, 그 다음 스케줄러) ──────────
 db_ok = init_db()
 
@@ -709,6 +718,7 @@ if db_ok:
         scheduler.add_job(midnight_job, 'cron', hour=0, minute=1)
         scheduler.add_job(today_job, 'interval', minutes=30)  # 30분마다 오늘 데이터 갱신
         scheduler.add_job(snapshot_job, 'cron', hour=23, minute=59)  # 자정 직전 포지션 스냅샷
+        scheduler.add_job(signals_sync_job, 'interval', minutes=30)  # 봇 신호 결과 자동 동기화
         scheduler.start()
         # 서버 완전 기동 후 백필 (10초 대기) + 시작 시점 스냅샷 1회 캡처
         threading.Thread(target=lambda: (time.sleep(10), capture_position_snapshot(), backfill(7)), daemon=True).start()
@@ -1294,79 +1304,109 @@ def signal_stats():
             'by_symbol':   agg('symbol'),
             'by_hour':     agg("(meta->>'hour_kst')"),
             'by_side':     agg("meta->>'signal'"),
+            'by_result':   agg('result'),
         })
     except Exception as e:
         return jsonify({'ok': False, 'msg': str(e)})
 
-@app.route('/api/signals/sync', methods=['POST'])
-def sync_signal_results():
+def _sync_signals_core():
     """
-    result가 비어있는 실거래 신호에 청산 결과 채우기.
+    result가 비어있는 실거래 신호에 청산 결과 채우기 (라우트 + 스케줄러 공용).
     OKX positions-history와 (심볼 + 방향 + 진입시각 ±5분)으로 매칭.
     bills의 pnl은 '청산 주문' ordId 기준이라 진입 ordId와 직접 매칭 불가 → 포지션 이력 사용.
+    청산 유형이 일반 청산(full/partial)이면 청산 평균가를 신호의 TP/SL 가격과 대조해
+    'tp' / 'sl' / 'manual'로 세분화한다.
+    반환: {'ok', 'matched', 'pending', 'msg'?}
     """
-    try:
-        ensure_signals_table()
-        with get_db() as conn:
-            with conn.cursor() as cur:
-                cur.execute('''
-                    SELECT id, symbol, meta FROM bot_signals
-                    WHERE result IS NULL
-                      AND (meta->>'dry_run')::boolean = false
-                      AND created_at < now() - interval '5 minutes'
-                      AND created_at > now() - interval '30 days'
-                    ORDER BY created_at DESC LIMIT 100
-                ''')
-                pending = cur.fetchall()
-        if not pending:
-            return jsonify({'ok': True, 'matched': 0, 'pending': 0, 'msg': '동기화 대상 없음'})
+    ensure_signals_table()
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute('''
+                SELECT id, symbol, meta FROM bot_signals
+                WHERE result IS NULL
+                  AND (meta->>'dry_run')::boolean = false
+                  AND created_at < now() - interval '5 minutes'
+                  AND created_at > now() - interval '30 days'
+                ORDER BY created_at DESC LIMIT 100
+            ''')
+            pending = cur.fetchall()
+    if not pending:
+        return {'ok': True, 'matched': 0, 'pending': 0, 'msg': '동기화 대상 없음'}
 
-        hist_r = okx_request('/api/v5/account/positions-history',
-                             {'instType': 'SWAP', 'limit': '100'})
-        if hist_r.get('code') != '0':
-            return jsonify({'ok': False, 'msg': f"positions-history 조회 실패: {hist_r.get('msg')}"})
-        history = hist_r.get('data', [])
+    hist_r = okx_request('/api/v5/account/positions-history',
+                         {'instType': 'SWAP', 'limit': '100'})
+    if hist_r.get('code') != '0':
+        return {'ok': False, 'msg': f"positions-history 조회 실패: {hist_r.get('msg')}"}
+    history = hist_r.get('data', [])
 
-        # OKX type 코드 → result 라벨
-        close_type = {'1': 'partial_close', '2': 'full_close',
-                      '3': 'liquidation', '4': 'partial_liquidation', '5': 'adl'}
-        TOL_MS = 5 * 60 * 1000
-        matched = 0
-        used_hist = set()
+    def classify_close(h, meta):
+        """청산가를 신호의 TP/SL과 대조해 결과 라벨 결정"""
+        okx_type = str(h.get('type', ''))
+        if okx_type in ('3', '4'):
+            return 'liquidation'
+        if okx_type == '5':
+            return 'adl'
+        # 일반 청산 → TP/SL 도달 여부 판정
+        try:
+            close_px = float(h.get('closeAvgPx', 0) or 0)
+            tp = float(meta.get('tp_price', 0) or 0)
+            sl = float(meta.get('sl_price', 0) or 0)
+        except (ValueError, TypeError):
+            return 'closed'
+        if close_px <= 0 or (tp <= 0 and sl <= 0):
+            return 'closed'
+        # 청산가가 TP/SL 중 어느 쪽에 가까운지 + 0.2% 허용오차 안인지
+        # (트레일링/가디언이 SL을 옮겼으면 원래 SL과 어긋나므로 tolerance 밖 → manual)
+        TOL = 0.002
+        d_tp = abs(close_px - tp) / tp if tp > 0 else 1e9
+        d_sl = abs(close_px - sl) / sl if sl > 0 else 1e9
+        if min(d_tp, d_sl) > TOL:
+            return 'manual'   # 수동 청산 or 가디언이 옮긴 SL/TP로 청산
+        return 'tp' if d_tp <= d_sl else 'sl'
 
-        with get_db() as conn:
-            with conn.cursor() as cur:
-                for sig_id, symbol, meta in pending:
-                    entry_ms = int(meta.get('entry_ts', 0)) * 1000
-                    side = meta.get('signal')
-                    if not entry_ms or not side:
-                        continue
-                    best = None
-                    for i, h in enumerate(history):
-                        if i in used_hist: continue
-                        if h.get('instId') != symbol: continue
-                        if h.get('direction') != side: continue
-                        try:
-                            gap = abs(int(h.get('cTime', 0)) - entry_ms)
-                        except (ValueError, TypeError):
-                            continue
-                        if gap < TOL_MS and (best is None or gap < best[1]):
-                            best = (i, gap)
-                    if best is None:
-                        continue
-                    h = history[best[0]]
-                    used_hist.add(best[0])
+    TOL_MS = 5 * 60 * 1000
+    matched = 0
+    used_hist = set()
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            for sig_id, symbol, meta in pending:
+                entry_ms = int(meta.get('entry_ts', 0)) * 1000
+                side = meta.get('signal')
+                if not entry_ms or not side:
+                    continue
+                best = None
+                for i, h in enumerate(history):
+                    if i in used_hist: continue
+                    if h.get('instId') != symbol: continue
+                    if h.get('direction') != side: continue
                     try:
-                        pnl = float(h.get('realizedPnl') or h.get('pnl') or 0)
+                        gap = abs(int(h.get('cTime', 0)) - entry_ms)
                     except (ValueError, TypeError):
-                        pnl = 0.0
-                    result = close_type.get(str(h.get('type', '')), 'closed')
-                    cur.execute('UPDATE bot_signals SET result=%s, pnl_usdt=%s WHERE id=%s',
-                                (result, pnl, sig_id))
-                    matched += 1
+                        continue
+                    if gap < TOL_MS and (best is None or gap < best[1]):
+                        best = (i, gap)
+                if best is None:
+                    continue
+                h = history[best[0]]
+                used_hist.add(best[0])
+                try:
+                    pnl = float(h.get('realizedPnl') or h.get('pnl') or 0)
+                except (ValueError, TypeError):
+                    pnl = 0.0
+                result = classify_close(h, meta)
+                cur.execute('UPDATE bot_signals SET result=%s, pnl_usdt=%s WHERE id=%s',
+                            (result, pnl, sig_id))
+                matched += 1
 
-        print(f'[signals-sync] {matched}/{len(pending)}건 매칭 완료')
-        return jsonify({'ok': True, 'matched': matched, 'pending': len(pending) - matched})
+    print(f'[signals-sync] {matched}/{len(pending)}건 매칭 완료')
+    return {'ok': True, 'matched': matched, 'pending': len(pending) - matched}
+
+@app.route('/api/signals/sync', methods=['POST'])
+def sync_signal_results():
+    """수동 SYNC 버튼용 라우트 — 코어 로직은 _sync_signals_core 공용"""
+    try:
+        return jsonify(_sync_signals_core())
     except Exception as e:
         return jsonify({'ok': False, 'msg': str(e)})
 
