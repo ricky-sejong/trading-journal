@@ -489,6 +489,10 @@ body{font-family:var(--sans);background:var(--bg);color:var(--text);min-height:1
       <div class="table-label">RECENT SIGNALS</div>
       <div id="signals-recent"></div>
     </div>
+    <div style="font-family:var(--mono);font-size:10px;color:var(--muted);margin-top:8px">
+      * 표시는 가상 판정: 실주문이 없는 신호(DRY/주문실패)를 진입 후 5분봉 재생으로 TP/SL 중 먼저 닿은 쪽 판정.
+      가격 기준 %이며 실제 체결·수수료·트레일링은 미반영. 실거래 승률(WIN RATE)과는 별도 집계.
+    </div>
   </div>
 
 </div><!-- /main -->
@@ -1365,13 +1369,19 @@ function renderSignalAgg(elId,rows,keyLabel,keyFmt){
   var el=document.getElementById(elId);
   if(!rows||!rows.length){el.innerHTML='<div style="padding:14px;font-family:var(--mono);font-size:11px;color:var(--muted)">데이터 없음</div>';return;}
   var body=rows.map(function(r){
+    var vwr='<span style="color:var(--muted)">—</span>';
+    if(r.v_win_rate!==null&&r.v_win_rate!==undefined){
+      var vc=r.v_win_rate>=50?'var(--green)':'var(--red)';
+      vwr='<span style="color:'+vc+'">'+r.v_win_rate+'%</span> <span style="color:var(--muted);font-size:10px">('+r.v_wins+'/'+r.v_closed+')</span>';
+    }
     return '<tr><td>'+(keyFmt?keyFmt(r.key):r.key)+'</td>'+
       '<td>'+r.signals+(r.live<r.signals?' <span style="color:var(--muted);font-size:10px">(live '+r.live+')</span>':'')+'</td>'+
       '<td>'+r.closed+'</td>'+
       '<td>'+sigFmtWr(r)+'</td>'+
+      '<td>'+vwr+'</td>'+
       '<td>'+sigFmtPnl(r.closed?r.pnl:null)+'</td></tr>';
   }).join('');
-  el.innerHTML='<table class="data-table"><thead><tr><th>'+keyLabel+'</th><th>SIGNALS</th><th>CLOSED</th><th>WIN RATE</th><th>PNL (USDT)</th></tr></thead><tbody>'+body+'</tbody></table>';
+  el.innerHTML='<table class="data-table"><thead><tr><th>'+keyLabel+'</th><th>SIGNALS</th><th>CLOSED</th><th>WIN RATE</th><th>VIRT WR*</th><th>PNL (USDT)</th></tr></thead><tbody>'+body+'</tbody></table>';
 }
 
 function loadSignalPanel(){
@@ -1391,7 +1401,8 @@ function loadSignalPanel(){
         '<div class="metric"><div class="m-label">LIVE ENTRIES</div><div class="m-val">'+t.live+'</div></div>'+
         '<div class="metric"><div class="m-label">CLOSED</div><div class="m-val">'+t.closed+'</div></div>'+
         '<div class="metric"><div class="m-label">WIN RATE</div><div class="m-val'+wrColor+'">'+wr+'</div></div>'+
-        '<div class="metric"><div class="m-label">REALIZED PNL</div><div class="m-val '+sigPnlCls(t.pnl)+'">'+(t.closed?((t.pnl>=0?'+':'')+t.pnl.toFixed(2)):'—')+'</div></div>';
+        '<div class="metric"><div class="m-label">REALIZED PNL</div><div class="m-val '+sigPnlCls(t.pnl)+'">'+(t.closed?((t.pnl>=0?'+':'')+t.pnl.toFixed(2)):'—')+'</div></div>'+
+        '<div class="metric"><div class="m-label">VIRT WIN RATE*</div><div class="m-val'+(t.v_win_rate===null||t.v_win_rate===undefined?'':(t.v_win_rate>=50?' pos':' neg'))+'">'+(t.v_win_rate===null||t.v_win_rate===undefined?'—':t.v_win_rate+'%')+'</div></div>';
 
       var EXIT_LABELS={order_failed:'주문 실패 ⚠',tp:'TP 도달 ✓',sl:'SL 도달 ✗',manual:'수동/가디언 청산',liquidation:'강제청산 🚨',adl:'ADL',closed:'청산(미분류)',full_close:'청산(미분류)',partial_close:'부분청산'};
       renderSignalAgg('signals-by-result',d.by_result,'EXIT',function(k){return EXIT_LABELS[k]||k;});
@@ -1437,9 +1448,19 @@ function loadSignalPanel(){
           var cc=chg>0?'var(--green)':(chg<0?'var(--red)':'var(--text2)');
           nowCell=fmtPx(mark)+' <span style="color:'+cc+';font-size:10px">'+(chg>=0?'+':'')+chg.toFixed(2)+'%</span>';
         }
+        var V_LABELS={
+          v_tp:'<span style="color:var(--green)">TP*</span>',
+          v_sl:'<span style="color:var(--red)">SL*</span>',
+          v_unknown:'<span style="color:var(--muted)">?*</span>',
+          v_none:'<span style="color:var(--muted)">–*</span>'
+        };
         var result;
-        if(s.result){
+        if(s.result==='order_failed'&&s.v_result){
+          result=(RESULT_LABELS[s.result]||'FAIL')+' '+(V_LABELS[s.v_result]||'');
+        }else if(s.result){
           result=RESULT_LABELS[s.result]||s.result.toUpperCase();
+        }else if(s.v_result){
+          result=(m.dry_run?'<span style="color:var(--muted)">DRY</span> ':'')+(V_LABELS[s.v_result]||'');
         }else{
           result=m.dry_run?'<span style="color:var(--muted)">DRY</span>':'<span style="color:var(--yellow)">OPEN</span>';
         }
@@ -1453,7 +1474,7 @@ function loadSignalPanel(){
           '<td style="color:var(--green)">'+fmtPx(m.tp_price)+(m.tp_pct!=null?' <span style="color:var(--muted);font-size:10px">+'+m.tp_pct+'%</span>':'')+'</td>'+
           '<td style="color:var(--red)">'+fmtPx(m.sl_price)+(m.sl_pct!=null?' <span style="color:var(--muted);font-size:10px">-'+m.sl_pct+'%</span>':'')+'</td>'+
           '<td>'+result+'</td>'+
-          '<td>'+sigFmtPnl(s.pnl_usdt)+'</td>'+
+          '<td>'+(s.pnl_usdt!==null&&s.pnl_usdt!==undefined?sigFmtPnl(s.pnl_usdt):(s.v_pnl!==null&&s.v_pnl!==undefined?'<span style="color:'+(s.v_pnl>0?'var(--green)':'var(--red)')+';font-size:11px">'+(s.v_pnl>0?'+':'')+s.v_pnl.toFixed(2)+'%*</span>':'<span style="color:var(--muted)">—</span>'))+'</td>'+
         '</tr>';
       }).join('');
       el.innerHTML='<table class="data-table"><thead><tr><th>TIME</th><th>SYM</th><th>SIDE</th><th>STRATEGY</th><th>ENTRY</th><th>NOW</th><th>TP</th><th>SL</th><th>RESULT</th><th>PNL</th></tr></thead><tbody>'+body+'</tbody></table>';
@@ -1469,7 +1490,7 @@ function syncSignalResults(){
     .then(function(d){
       btn.disabled=false;btn.textContent='SYNC RESULTS';
       if(d.ok){
-        var msg='SYNC: '+d.matched+'건 매칭'+(d.pending?', '+d.pending+'건 미매칭':'');
+        var msg='SYNC: '+d.matched+'건 매칭'+(d.pending?', '+d.pending+'건 미매칭':'')+(d.virtual&&d.virtual.evaluated?', 가상판정 '+d.virtual.evaluated+'건':'');
         document.getElementById('signals-sub').textContent=msg;
         var diagEl=document.getElementById('signals-diag');
         if(d.diag&&d.diag.length){

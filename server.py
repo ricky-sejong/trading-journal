@@ -707,6 +707,10 @@ def signals_sync_job():
             print(f"[scheduler] 신호 결과 자동 동기화: {r['matched']}건 매칭")
     except Exception as e:
         print(f'[scheduler] 신호 동기화 실패: {e}')
+    try:
+        _virtual_eval_core(limit=20)
+    except Exception as e:
+        print(f'[scheduler] 가상 판정 실패: {e}')
 
 # ── 초기화 (순서 중요: DB 먼저, 그 다음 스케줄러) ──────────
 db_ok = init_db()
@@ -1213,6 +1217,9 @@ def ensure_signals_table():
                 ''')
                 cur.execute('CREATE INDEX IF NOT EXISTS idx_bot_signals_ord_id ON bot_signals (ord_id)')
                 cur.execute('CREATE INDEX IF NOT EXISTS idx_bot_signals_symbol ON bot_signals (symbol)')
+                # 가상 판정 (DRY/주문실패 신호를 캔들 재생으로 TP/SL 판정)
+                cur.execute('ALTER TABLE bot_signals ADD COLUMN IF NOT EXISTS v_result TEXT')
+                cur.execute('ALTER TABLE bot_signals ADD COLUMN IF NOT EXISTS v_pnl NUMERIC')
         _signals_table_ready = True
     except Exception as e:
         print(f'[signals] 테이블 준비 실패: {e}')
@@ -1227,7 +1234,7 @@ def get_signals():
         symbol   = request.args.get('symbol')
         strategy = request.args.get('strategy')
 
-        q = '''SELECT id, ord_id, symbol, meta, result, pnl_usdt, created_at
+        q = '''SELECT id, ord_id, symbol, meta, result, pnl_usdt, created_at, v_result, v_pnl
                FROM bot_signals
                WHERE created_at > now() - (%s || ' days')::interval'''
         args = [str(days)]
@@ -1245,6 +1252,7 @@ def get_signals():
             'id': r[0], 'ord_id': r[1], 'symbol': r[2], 'meta': r[3],
             'result': r[4], 'pnl_usdt': float(r[5]) if r[5] is not None else None,
             'created_at': r[6].astimezone(KST).strftime('%Y-%m-%d %H:%M:%S'),
+            'v_result': r[7], 'v_pnl': float(r[8]) if r[8] is not None else None,
         } for r in rows]
 
         # 미청산(OPEN/DRY) 신호가 있으면 해당 심볼들의 현재가를 함께 반환
@@ -1283,7 +1291,9 @@ def signal_stats():
                            COUNT(*) FILTER (WHERE (meta->>'dry_run')::boolean = false) AS live,
                            COUNT(pnl_usdt) AS closed,
                            COUNT(*) FILTER (WHERE pnl_usdt > 0) AS wins,
-                           COALESCE(SUM(pnl_usdt), 0) AS pnl
+                           COALESCE(SUM(pnl_usdt), 0) AS pnl,
+                           COUNT(*) FILTER (WHERE v_result IN ('v_tp','v_sl')) AS v_closed,
+                           COUNT(*) FILTER (WHERE v_result = 'v_tp') AS v_wins
                     FROM bot_signals WHERE {base_where}
                     GROUP BY 1 ORDER BY n DESC'''
             with get_db() as conn:
@@ -1295,6 +1305,8 @@ def signal_stats():
                 'wins': r[4],
                 'win_rate': round(r[4] / r[3] * 100, 1) if r[3] else None,
                 'pnl': round(float(r[5]), 4),
+                'v_closed': r[6], 'v_wins': r[7],
+                'v_win_rate': round(r[7] / r[6] * 100, 1) if r[6] else None,
             } for r in rows if r[0] is not None]
 
         with get_db() as conn:
@@ -1303,13 +1315,17 @@ def signal_stats():
                                        COUNT(*) FILTER (WHERE (meta->>'dry_run')::boolean = false),
                                        COUNT(pnl_usdt),
                                        COUNT(*) FILTER (WHERE pnl_usdt > 0),
-                                       COALESCE(SUM(pnl_usdt), 0)
+                                       COALESCE(SUM(pnl_usdt), 0),
+                                       COUNT(*) FILTER (WHERE v_result IN ('v_tp','v_sl')),
+                                       COUNT(*) FILTER (WHERE v_result = 'v_tp')
                                 FROM bot_signals WHERE {base_where}''', (str(days),))
                 t = cur.fetchone()
         total = {
             'signals': t[0], 'live': t[1], 'closed': t[2], 'wins': t[3],
             'win_rate': round(t[3] / t[2] * 100, 1) if t[2] else None,
             'pnl': round(float(t[4]), 4),
+            'v_closed': t[5], 'v_wins': t[6],
+            'v_win_rate': round(t[6] / t[5] * 100, 1) if t[5] else None,
         }
         return jsonify({
             'ok': True, 'days': days, 'total': total,
@@ -1322,6 +1338,114 @@ def signal_stats():
         })
     except Exception as e:
         return jsonify({'ok': False, 'msg': str(e)})
+
+def _fetch_candles_since(inst_id, start_ms, bar='5m', max_pages=12):
+    """
+    start_ms부터 현재까지의 캔들을 시간순(과거→현재)으로 수집.
+    OKX history-candles를 after 커서로 과거 방향 페이지네이션 (페이지당 100개).
+    max_pages=12 → 5분봉 1200개 ≈ 4.1일 커버.
+    """
+    collected = []
+    after = None
+    for _ in range(max_pages):
+        params = {'instId': inst_id, 'bar': bar, 'limit': '100'}
+        if after:
+            params['after'] = after
+        r = okx_request('/api/v5/market/history-candles', params)
+        if r.get('code') != '0' or not r.get('data'):
+            break
+        data = r['data']            # 최신→과거 순
+        collected.extend(data)
+        oldest_ts = int(data[-1][0])
+        if oldest_ts <= start_ms:   # 진입 시점까지 도달
+            break
+        after = data[-1][0]
+    rows = [c for c in collected if int(c[0]) >= start_ms]
+    rows.sort(key=lambda c: int(c[0]))   # 과거→현재
+    return rows
+
+def _virtual_eval_core(limit=20):
+    """
+    실주문이 없는 신호(DRY / 주문실패)를 캔들 재생으로 가상 판정.
+      v_tp      : TP가 먼저 닿음        v_sl      : SL이 먼저 닿음
+      v_unknown : 같은 캔들에서 둘 다 닿음 (순서 판정 불가)
+      v_none    : 3일 내 둘 다 안 닿음 (판정 포기)
+      (아직 둘 다 안 닿았고 3일 미경과 → NULL 유지, 다음 실행 때 재시도)
+    v_pnl은 가격 기준 %(레버리지 미반영). 실제 PNL(pnl_usdt)과는 별도 컬럼.
+    주의: 추세장 신호는 실전에서 트레일링 스탑이 SL을 옮기므로 가상 판정은 근사치.
+    """
+    ensure_signals_table()
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute('''
+                SELECT id, symbol, meta FROM bot_signals
+                WHERE v_result IS NULL
+                  AND ((meta->>'dry_run')::boolean = true OR result = 'order_failed')
+                  AND meta->>'tp_price' IS NOT NULL AND meta->>'sl_price' IS NOT NULL
+                  AND created_at < now() - interval '15 minutes'
+                  AND created_at > now() - interval '30 days'
+                ORDER BY created_at ASC LIMIT %s
+            ''', (limit,))
+            candidates = cur.fetchall()
+    if not candidates:
+        return {'evaluated': 0, 'pending': 0}
+
+    MAX_WINDOW_MS = 3 * 24 * 3600 * 1000
+    now_ms = int(time.time() * 1000)
+    evaluated = 0
+    updates = []
+
+    for sig_id, symbol, meta in candidates:
+        try:
+            entry_ms = int(meta.get('entry_ts', 0)) * 1000
+            side = meta.get('signal')
+            tp = float(meta.get('tp_price'))
+            sl = float(meta.get('sl_price'))
+            tp_pct = float(meta.get('tp_pct', 0) or 0)
+            sl_pct = float(meta.get('sl_pct', 0) or 0)
+        except (ValueError, TypeError):
+            updates.append((sig_id, 'v_none', None))
+            continue
+        if not entry_ms or side not in ('long', 'short') or tp <= 0 or sl <= 0:
+            updates.append((sig_id, 'v_none', None))
+            continue
+
+        candles = _fetch_candles_since(symbol, entry_ms)
+        verdict, v_pnl = None, None
+        for c in candles:
+            try:
+                high, low = float(c[2]), float(c[3])
+            except (ValueError, TypeError, IndexError):
+                continue
+            if side == 'long':
+                hit_tp, hit_sl = high >= tp, low <= sl
+            else:
+                hit_tp, hit_sl = low <= tp, high >= sl
+            if hit_tp and hit_sl:
+                verdict, v_pnl = 'v_unknown', None
+                break
+            if hit_tp:
+                verdict, v_pnl = 'v_tp', tp_pct
+                break
+            if hit_sl:
+                verdict, v_pnl = 'v_sl', -sl_pct
+                break
+        if verdict is None:
+            if now_ms - entry_ms > MAX_WINDOW_MS:
+                verdict = 'v_none'
+            else:
+                continue   # 아직 미판정 — 다음 실행 때 재시도
+        updates.append((sig_id, verdict, v_pnl))
+        evaluated += 1
+
+    if updates:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                for sig_id, verdict, v_pnl in updates:
+                    cur.execute('UPDATE bot_signals SET v_result=%s, v_pnl=%s WHERE id=%s',
+                                (verdict, v_pnl, sig_id))
+    print(f'[virtual-eval] {evaluated}건 판정 (후보 {len(candidates)}건)')
+    return {'evaluated': evaluated, 'pending': len(candidates) - evaluated}
 
 def _sync_signals_core():
     """
@@ -1437,9 +1561,14 @@ def _sync_signals_core():
 
 @app.route('/api/signals/sync', methods=['POST'])
 def sync_signal_results():
-    """수동 SYNC 버튼용 라우트 — 코어 로직은 _sync_signals_core 공용"""
+    """수동 SYNC 버튼용 라우트 — 실거래 매칭 + 가상 판정 순차 실행"""
     try:
-        return jsonify(_sync_signals_core())
+        r = _sync_signals_core()
+        try:
+            r['virtual'] = _virtual_eval_core(limit=20)
+        except Exception as e:
+            r['virtual'] = {'error': str(e)}
+        return jsonify(r)
     except Exception as e:
         return jsonify({'ok': False, 'msg': str(e)})
 
