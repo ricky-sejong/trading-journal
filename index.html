@@ -1421,10 +1421,20 @@ function loadSignalPanel(){
         full_close:'<span style="color:var(--text2)">CLOSED</span>',
         partial_close:'<span style="color:var(--text2)">PARTIAL</span>'
       };
+      var prices=d.prices||{};
       var body=d.signals.map(function(s){
         var m=s.meta||{};
         var dirColor=m.signal==='long'?'var(--green)':'var(--red)';
         var dirLabel=m.signal==='long'?'LONG':'SHORT';
+        // 미청산 신호: 현재가 + 방향 반영 등락률
+        var nowCell='—';
+        if(!s.result && prices[s.symbol] && m.price){
+          var mark=prices[s.symbol];
+          var chg=(mark-parseFloat(m.price))/parseFloat(m.price)*100;
+          if(m.signal==='short')chg=-chg;   // 숏은 하락이 수익
+          var cc=chg>0?'var(--green)':(chg<0?'var(--red)':'var(--text2)');
+          nowCell=fmtPx(mark)+' <span style="color:'+cc+';font-size:10px">'+(chg>=0?'+':'')+chg.toFixed(2)+'%</span>';
+        }
         var result;
         if(s.result){
           result=RESULT_LABELS[s.result]||s.result.toUpperCase();
@@ -1437,13 +1447,14 @@ function loadSignalPanel(){
           '<td style="color:'+dirColor+'">'+dirLabel+'</td>'+
           '<td>'+(STRATEGY_LABELS[m.strategy]||m.strategy||'—')+'</td>'+
           '<td>'+fmtPx(m.price)+'</td>'+
+          '<td style="white-space:nowrap">'+nowCell+'</td>'+
           '<td style="color:var(--green)">'+fmtPx(m.tp_price)+(m.tp_pct!=null?' <span style="color:var(--muted);font-size:10px">+'+m.tp_pct+'%</span>':'')+'</td>'+
           '<td style="color:var(--red)">'+fmtPx(m.sl_price)+(m.sl_pct!=null?' <span style="color:var(--muted);font-size:10px">-'+m.sl_pct+'%</span>':'')+'</td>'+
           '<td>'+result+'</td>'+
           '<td>'+sigFmtPnl(s.pnl_usdt)+'</td>'+
         '</tr>';
       }).join('');
-      el.innerHTML='<table class="data-table"><thead><tr><th>TIME</th><th>SYM</th><th>SIDE</th><th>STRATEGY</th><th>ENTRY</th><th>TP</th><th>SL</th><th>RESULT</th><th>PNL</th></tr></thead><tbody>'+body+'</tbody></table>';
+      el.innerHTML='<table class="data-table"><thead><tr><th>TIME</th><th>SYM</th><th>SIDE</th><th>STRATEGY</th><th>ENTRY</th><th>NOW</th><th>TP</th><th>SL</th><th>RESULT</th><th>PNL</th></tr></thead><tbody>'+body+'</tbody></table>';
     })
     .catch(function(){});
 }

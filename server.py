@@ -1246,7 +1246,21 @@ def get_signals():
             'result': r[4], 'pnl_usdt': float(r[5]) if r[5] is not None else None,
             'created_at': r[6].astimezone(KST).strftime('%Y-%m-%d %H:%M:%S'),
         } for r in rows]
-        return jsonify({'ok': True, 'signals': signals, 'count': len(signals)})
+
+        # 미청산(OPEN/DRY) 신호가 있으면 해당 심볼들의 현재가를 함께 반환
+        prices = {}
+        open_symbols = {s['symbol'] for s in signals if not s['result']}
+        if open_symbols:
+            tick_r = okx_request('/api/v5/market/tickers', {'instType': 'SWAP'})
+            if tick_r.get('code') == '0':
+                for t in tick_r.get('data', []):
+                    if t.get('instId') in open_symbols:
+                        try:
+                            prices[t['instId']] = float(t.get('last', 0) or 0)
+                        except (ValueError, TypeError):
+                            pass
+
+        return jsonify({'ok': True, 'signals': signals, 'count': len(signals), 'prices': prices})
     except Exception as e:
         return jsonify({'ok': False, 'msg': str(e)})
 
