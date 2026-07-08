@@ -271,6 +271,33 @@ def okx_request(path, params=None):
         print(f'[OKX] Error on {path}: {e}')
         return {'code': '-1', 'msg': str(e)}
 
+def okx_request_all(path, params, max_pages=10):
+    """
+    OKX 페이지네이션 조회 — limit(100)에 걸린 초과분까지 전부 가져온다.
+    fills-history / bills / bills-archive 모두 billId 기준 'after' 커서 지원.
+    (하루 체결 100건 초과 시 데이터 유실 방지 — 멀티 심볼 봇 가동 시 필수)
+    """
+    all_data = []
+    p = dict(params)
+    limit = int(p.get('limit', 100))
+    for _ in range(max_pages):
+        r = okx_request(path, p)
+        if r.get('code') != '0':
+            # 첫 페이지 실패면 에러 그대로 반환, 이후 페이지 실패면 수집분이라도 반환
+            return r if not all_data else {'code': '0', 'data': all_data, 'partial': True}
+        data = r.get('data', [])
+        all_data.extend(data)
+        if len(data) < limit:
+            break
+        last = data[-1]
+        cursor = last.get('billId') or last.get('tradeId') or last.get('ordId')
+        if not cursor:
+            break
+        p['after'] = cursor  # 이 ID보다 오래된 레코드 요청
+    if len(all_data) > limit:
+        print(f'[okx-paged] {path}: {len(all_data)}건 (페이지네이션 동작)')
+    return {'code': '0', 'data': all_data}
+
 # ── 날짜 유틸 ───────────────────────────────────────────
 def date_to_ms_kst(date_str, end=False):
     d = datetime.datetime.strptime(date_str, '%Y-%m-%d').replace(tzinfo=KST)
@@ -293,7 +320,7 @@ def fetch_day_balances(date_str):
     end_ms   = date_to_ms_kst(date_str, end=True)
 
     # SWAP 관련 bill 타입: 실현손익(8), 수수료(14), 자금비용(6)
-    bills_r = okx_request('/api/v5/account/bills-archive', {
+    bills_r = okx_request_all('/api/v5/account/bills-archive', {
         'ccy':   'USDT',
         'begin': str(start_ms),
         'end':   str(end_ms),
@@ -303,7 +330,7 @@ def fetch_day_balances(date_str):
 
     if bills_r.get('code') != '0' or not bills_r.get('data'):
         # bills-archive 실패 시 일반 bills 시도
-        bills_r = okx_request('/api/v5/account/bills', {
+        bills_r = okx_request_all('/api/v5/account/bills', {
             'ccy':   'USDT',
             'begin': str(start_ms),
             'end':   str(end_ms),
@@ -356,11 +383,11 @@ def fetch_pnl_by_ordid(date_str):
     start_ms = date_to_ms_kst(date_str, end=False)
     end_ms   = date_to_ms_kst(date_str, end=True)
 
-    bills_r = okx_request('/api/v5/account/bills-archive', {
+    bills_r = okx_request_all('/api/v5/account/bills-archive', {
         'ccy': 'USDT', 'begin': str(start_ms), 'end': str(end_ms), 'limit': '100'
     })
     if bills_r.get('code') != '0' or not bills_r.get('data'):
-        bills_r = okx_request('/api/v5/account/bills', {
+        bills_r = okx_request_all('/api/v5/account/bills', {
             'ccy': 'USDT', 'begin': str(start_ms), 'end': str(end_ms), 'limit': '100'
         })
 
@@ -417,7 +444,7 @@ def fetch_okx_daily(date_str):
     start_ms = date_to_ms_kst(date_str, end=False)
     end_ms   = date_to_ms_kst(date_str, end=True)
 
-    fills = okx_request('/api/v5/trade/fills-history', {
+    fills = okx_request_all('/api/v5/trade/fills-history', {
         'instType': 'SWAP', 'begin': str(start_ms), 'end': str(end_ms), 'limit': '100'
     })
     print(f'[fills] {date_str} code={fills.get("code")} count={len(fills.get("data",[]))}')
@@ -439,7 +466,10 @@ def fetch_okx_daily(date_str):
         for f in fills.get('data', []):
             oid = f.get('ordId') or f.get('tradeId', str(time.time()))
             fills_pnl = f.get('pnl')
-            pnl = float(fills_pnl) if fills_pnl is not None else 0.0
+            try:
+                pnl = float(fills_pnl) if fills_pnl not in (None, '') else 0.0
+            except (ValueError, TypeError):
+                pnl = 0.0
             fee = float(f.get('fee', 0) or 0)
             sz  = float(f.get('fillSz', 0) or 0)
             px  = float(f.get('fillPx', 0) or 0)
@@ -703,6 +733,17 @@ def run_guardian():
             print(f'[Guardian] 설정 복원 실패 (기본값 사용): {e}')
             pg.guardian_pos_config = {}
 
+        # 전체 ON/OFF도 DB에서 복원 (재배포 시 True로 리셋되는 문제 방지)
+        try:
+            saved_running = db_get_setting('guardian_running')
+            if saved_running is None:
+                db_set_setting('guardian_running', 'true')  # 최초 기본값
+            else:
+                pg.guardian_running = (saved_running == 'true')
+                print(f'[Guardian] 전체 ON/OFF 복원: {pg.guardian_running}')
+        except Exception as e:
+            print(f'[Guardian] 전체 ON/OFF 복원 실패 (기본 True): {e}')
+
         print('[Guardian] OKX Position Guardian 시작...')
         PositionGuardian(guardian_cfg()).run()
     except ImportError:
@@ -711,6 +752,32 @@ def run_guardian():
         print(f'[Guardian] 오류: {e}')
 
 threading.Thread(target=run_guardian, daemon=True).start()
+
+# ── Entry Bot (신규 진입 신호 봇) ───────────────────────────
+def run_entry_bot():
+    """
+    entry_bot.py — BBW 국면감지 기반 하이브리드 진입 봇.
+    Guardian처럼 항상 백그라운드로 실행되며, 실제 진입 여부는 DB 설정(웹사이트 토글)으로 제어된다.
+    기본값은 OFF — 웹사이트에서 켜야 진입을 시작한다.
+    Guardian과 역할 분담: 이 봇은 신규 진입만, Guardian은 SL/TP 관리만.
+    """
+    try:
+        from entry_bot import EntryBot, load_config as entry_cfg
+        # 기본 설정값이 DB에 없으면 생성 (최초 1회)
+        if db_get_setting('entry_bot_running') is None:
+            db_set_setting('entry_bot_running', 'false')
+        if db_get_setting('entry_bot_usdt_amount') is None:
+            db_set_setting('entry_bot_usdt_amount', '50')
+        if db_get_setting('entry_bot_leverage') is None:
+            db_set_setting('entry_bot_leverage', '25')
+        print('[EntryBot] OKX 진입 봇 시작 (DB 설정으로 ON/OFF 제어)...')
+        EntryBot(entry_cfg()).run()
+    except ImportError:
+        print('[EntryBot] entry_bot.py 없음 — 건너뜀')
+    except Exception as e:
+        print(f'[EntryBot] 오류: {e}')
+
+threading.Thread(target=run_entry_bot, daemon=True).start()
 
 # ── Flask 라우트 ──────────────────────────────────────────
 @app.route('/')
@@ -1006,7 +1073,7 @@ def guardian_status():
         latest = state.get('latest', {})
         return jsonify({
             'ok': True,
-            'running': pg.guardian_running,   # 모듈 속성으로 실시간 조회 (import 복사 X)
+            'running': db_get_setting('guardian_running', 'true') == 'true',  # DB가 단일 진실 (재배포에도 유지)
             'position_count': latest.get('position_count', 0),
             'positions': latest.get('positions', []),
             'last_update': latest.get('time', '—'),
@@ -1014,11 +1081,73 @@ def guardian_status():
     except Exception as e:
         return jsonify({'ok': False, 'running': False, 'msg': str(e)})
 
+@app.route('/api/entrybot/status')
+def entry_bot_status():
+    """Entry Bot 상태 + 설정 조회 (DB 기준)"""
+    try:
+        running = db_get_setting('entry_bot_running', 'false') == 'true'
+        usdt_amount = float(db_get_setting('entry_bot_usdt_amount', '50') or 50)
+        leverage = int(float(db_get_setting('entry_bot_leverage', '25') or 25))
+
+        state_path = 'entry_bot_state.json'
+        state = {}
+        if os.path.exists(state_path):
+            with open(state_path) as f:
+                state = json.load(f)
+        latest = state.get('latest', {})
+        return jsonify({
+            'ok': True,
+            'running': running,
+            'usdt_amount': usdt_amount,
+            'leverage': leverage,
+            'symbol': latest.get('symbol', '—'),
+            'phase': latest.get('phase', '—'),
+            'signal': latest.get('signal'),
+            'strategy': latest.get('strategy', '—'),
+            'price': latest.get('price'),
+            'bbw': latest.get('bbw'),
+            'last_update': latest.get('time', '—'),
+            'open_position_count': state.get('open_position_count', 0),
+            'positions': state.get('positions', []),
+        })
+    except Exception as e:
+        return jsonify({'ok': False, 'msg': str(e)})
+
+@app.route('/api/entrybot/config', methods=['POST'])
+def entry_bot_config():
+    """웹사이트에서 봇 ON/OFF, 진입 금액(USDT), 레버리지 설정 — DB에 영속 저장"""
+    try:
+        body = request.json or {}
+        if 'running' in body:
+            db_set_setting('entry_bot_running', 'true' if body['running'] else 'false')
+            print(f"[EntryBot] 사용자가 {'활성화' if body['running'] else '정지'}")
+        if 'usdt_amount' in body:
+            amount = float(body['usdt_amount'])
+            if amount <= 0:
+                return jsonify({'ok': False, 'msg': '금액은 0보다 커야 해요.'}), 400
+            db_set_setting('entry_bot_usdt_amount', str(amount))
+            print(f'[EntryBot] 진입 금액 설정: {amount} USDT')
+        if 'leverage' in body:
+            leverage = int(float(body['leverage']))
+            if leverage <= 0 or leverage > 125:
+                return jsonify({'ok': False, 'msg': '레버리지는 1~125 사이여야 해요.'}), 400
+            db_set_setting('entry_bot_leverage', str(leverage))
+            print(f'[EntryBot] 레버리지 설정: {leverage}x')
+        return jsonify({
+            'ok': True,
+            'running': db_get_setting('entry_bot_running', 'false') == 'true',
+            'usdt_amount': float(db_get_setting('entry_bot_usdt_amount', '50') or 50),
+            'leverage': int(float(db_get_setting('entry_bot_leverage', '25') or 25)),
+        })
+    except Exception as e:
+        return jsonify({'ok': False, 'msg': str(e)})
+
 @app.route('/api/guardian/start', methods=['POST'])
 def guardian_start():
     try:
         import position_guardian as pg
         pg.guardian_running = True
+        db_set_setting('guardian_running', 'true')
         print('[Guardian] 사용자가 Guardian 활성화')
         return jsonify({'ok': True, 'running': True})
     except Exception as e:
@@ -1029,6 +1158,7 @@ def guardian_stop():
     try:
         import position_guardian as pg
         pg.guardian_running = False
+        db_set_setting('guardian_running', 'false')
         print('[Guardian] 사용자가 Guardian 일시정지')
         return jsonify({'ok': True, 'running': False})
     except Exception as e:
@@ -1046,6 +1176,197 @@ def guardian_config():
             if 'skip_if_has_tp' in body:
                 pg.guardian_instance.skip_if_has_tp = bool(body['skip_if_has_tp'])
         return jsonify({'ok': True})
+    except Exception as e:
+        return jsonify({'ok': False, 'msg': str(e)})
+
+# ── Bot Signals (진입 신호 태깅 조회/통계) ─────────────────
+_signals_table_ready = False
+
+def ensure_signals_table():
+    """bot_signals 테이블 보장 (entry_bot도 생성하지만 서버가 먼저 조회할 수 있음)"""
+    global _signals_table_ready
+    if _signals_table_ready:
+        return
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute('''
+                    CREATE TABLE IF NOT EXISTS bot_signals (
+                        id         SERIAL PRIMARY KEY,
+                        ord_id     TEXT,
+                        symbol     TEXT NOT NULL,
+                        meta       JSONB NOT NULL DEFAULT '{}',
+                        result     TEXT,
+                        pnl_usdt   NUMERIC,
+                        created_at TIMESTAMPTZ DEFAULT now()
+                    )
+                ''')
+                cur.execute('CREATE INDEX IF NOT EXISTS idx_bot_signals_ord_id ON bot_signals (ord_id)')
+                cur.execute('CREATE INDEX IF NOT EXISTS idx_bot_signals_symbol ON bot_signals (symbol)')
+        _signals_table_ready = True
+    except Exception as e:
+        print(f'[signals] 테이블 준비 실패: {e}')
+
+@app.route('/api/signals')
+def get_signals():
+    """최근 신호 목록. ?days=30&symbol=BTC-USDT-SWAP&strategy=donchian_breakout&limit=100"""
+    try:
+        ensure_signals_table()
+        days     = int(request.args.get('days', 30))
+        limit    = min(int(request.args.get('limit', 100)), 500)
+        symbol   = request.args.get('symbol')
+        strategy = request.args.get('strategy')
+
+        q = '''SELECT id, ord_id, symbol, meta, result, pnl_usdt, created_at
+               FROM bot_signals
+               WHERE created_at > now() - (%s || ' days')::interval'''
+        args = [str(days)]
+        if symbol:
+            q += ' AND symbol = %s'; args.append(symbol)
+        if strategy:
+            q += " AND meta->>'strategy' = %s"; args.append(strategy)
+        q += ' ORDER BY created_at DESC LIMIT %s'; args.append(limit)
+
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(q, args)
+                rows = cur.fetchall()
+        signals = [{
+            'id': r[0], 'ord_id': r[1], 'symbol': r[2], 'meta': r[3],
+            'result': r[4], 'pnl_usdt': float(r[5]) if r[5] is not None else None,
+            'created_at': r[6].astimezone(KST).strftime('%Y-%m-%d %H:%M:%S'),
+        } for r in rows]
+        return jsonify({'ok': True, 'signals': signals, 'count': len(signals)})
+    except Exception as e:
+        return jsonify({'ok': False, 'msg': str(e)})
+
+@app.route('/api/signals/stats')
+def signal_stats():
+    """전략/레짐/심볼/시간대별 집계. ?days=30&live_only=false
+    승률은 result가 채워진(청산 완료) 실거래 신호 기준."""
+    try:
+        ensure_signals_table()
+        days = int(request.args.get('days', 30))
+        live_only = request.args.get('live_only', 'false') == 'true'
+
+        base_where = "created_at > now() - (%s || ' days')::interval"
+        if live_only:
+            base_where += " AND (meta->>'dry_run')::boolean = false"
+
+        def agg(group_expr):
+            q = f'''SELECT {group_expr} AS k,
+                           COUNT(*) AS n,
+                           COUNT(*) FILTER (WHERE (meta->>'dry_run')::boolean = false) AS live,
+                           COUNT(pnl_usdt) AS closed,
+                           COUNT(*) FILTER (WHERE pnl_usdt > 0) AS wins,
+                           COALESCE(SUM(pnl_usdt), 0) AS pnl
+                    FROM bot_signals WHERE {base_where}
+                    GROUP BY 1 ORDER BY n DESC'''
+            with get_db() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(q, (str(days),))
+                    rows = cur.fetchall()
+            return [{
+                'key': r[0], 'signals': r[1], 'live': r[2], 'closed': r[3],
+                'wins': r[4],
+                'win_rate': round(r[4] / r[3] * 100, 1) if r[3] else None,
+                'pnl': round(float(r[5]), 4),
+            } for r in rows if r[0] is not None]
+
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(f'''SELECT COUNT(*),
+                                       COUNT(*) FILTER (WHERE (meta->>'dry_run')::boolean = false),
+                                       COUNT(pnl_usdt),
+                                       COUNT(*) FILTER (WHERE pnl_usdt > 0),
+                                       COALESCE(SUM(pnl_usdt), 0)
+                                FROM bot_signals WHERE {base_where}''', (str(days),))
+                t = cur.fetchone()
+        total = {
+            'signals': t[0], 'live': t[1], 'closed': t[2], 'wins': t[3],
+            'win_rate': round(t[3] / t[2] * 100, 1) if t[2] else None,
+            'pnl': round(float(t[4]), 4),
+        }
+        return jsonify({
+            'ok': True, 'days': days, 'total': total,
+            'by_strategy': agg("meta->>'strategy'"),
+            'by_regime':   agg("meta->>'regime'"),
+            'by_symbol':   agg('symbol'),
+            'by_hour':     agg("(meta->>'hour_kst')"),
+            'by_side':     agg("meta->>'signal'"),
+        })
+    except Exception as e:
+        return jsonify({'ok': False, 'msg': str(e)})
+
+@app.route('/api/signals/sync', methods=['POST'])
+def sync_signal_results():
+    """
+    result가 비어있는 실거래 신호에 청산 결과 채우기.
+    OKX positions-history와 (심볼 + 방향 + 진입시각 ±5분)으로 매칭.
+    bills의 pnl은 '청산 주문' ordId 기준이라 진입 ordId와 직접 매칭 불가 → 포지션 이력 사용.
+    """
+    try:
+        ensure_signals_table()
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute('''
+                    SELECT id, symbol, meta FROM bot_signals
+                    WHERE result IS NULL
+                      AND (meta->>'dry_run')::boolean = false
+                      AND created_at < now() - interval '5 minutes'
+                      AND created_at > now() - interval '30 days'
+                    ORDER BY created_at DESC LIMIT 100
+                ''')
+                pending = cur.fetchall()
+        if not pending:
+            return jsonify({'ok': True, 'matched': 0, 'pending': 0, 'msg': '동기화 대상 없음'})
+
+        hist_r = okx_request('/api/v5/account/positions-history',
+                             {'instType': 'SWAP', 'limit': '100'})
+        if hist_r.get('code') != '0':
+            return jsonify({'ok': False, 'msg': f"positions-history 조회 실패: {hist_r.get('msg')}"})
+        history = hist_r.get('data', [])
+
+        # OKX type 코드 → result 라벨
+        close_type = {'1': 'partial_close', '2': 'full_close',
+                      '3': 'liquidation', '4': 'partial_liquidation', '5': 'adl'}
+        TOL_MS = 5 * 60 * 1000
+        matched = 0
+        used_hist = set()
+
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                for sig_id, symbol, meta in pending:
+                    entry_ms = int(meta.get('entry_ts', 0)) * 1000
+                    side = meta.get('signal')
+                    if not entry_ms or not side:
+                        continue
+                    best = None
+                    for i, h in enumerate(history):
+                        if i in used_hist: continue
+                        if h.get('instId') != symbol: continue
+                        if h.get('direction') != side: continue
+                        try:
+                            gap = abs(int(h.get('cTime', 0)) - entry_ms)
+                        except (ValueError, TypeError):
+                            continue
+                        if gap < TOL_MS and (best is None or gap < best[1]):
+                            best = (i, gap)
+                    if best is None:
+                        continue
+                    h = history[best[0]]
+                    used_hist.add(best[0])
+                    try:
+                        pnl = float(h.get('realizedPnl') or h.get('pnl') or 0)
+                    except (ValueError, TypeError):
+                        pnl = 0.0
+                    result = close_type.get(str(h.get('type', '')), 'closed')
+                    cur.execute('UPDATE bot_signals SET result=%s, pnl_usdt=%s WHERE id=%s',
+                                (result, pnl, sig_id))
+                    matched += 1
+
+        print(f'[signals-sync] {matched}/{len(pending)}건 매칭 완료')
+        return jsonify({'ok': True, 'matched': matched, 'pending': len(pending) - matched})
     except Exception as e:
         return jsonify({'ok': False, 'msg': str(e)})
 

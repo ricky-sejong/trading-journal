@@ -326,6 +326,9 @@ body{font-family:var(--sans);background:var(--bg);color:var(--text);min-height:1
     <div class="nav-item" onclick="switchPanel('trades')">
       <span class="nav-icon">▪</span> LIVE TRADES
     </div>
+    <div class="nav-item" onclick="switchPanel('signals')">
+      <span class="nav-icon">▪</span> BOT SIGNALS
+    </div>
   </nav>
   <div class="sidebar-footer">
     <div class="conn-indicator">
@@ -408,6 +411,26 @@ body{font-family:var(--sans);background:var(--bg);color:var(--text);min-height:1
       </div>
       <span style="font-family:var(--mono);font-size:9px;color:var(--muted);margin-left:auto">포지션별 ON/OFF는 아래 테이블에서 설정</span>
     </div>
+
+    <!-- Entry Bot 제어 (신규 진입 봇 — ON/OFF + 진입 금액 설정) -->
+    <div style="background:var(--bg2);border:1px solid var(--border);border-radius:2px;padding:12px 16px;margin-bottom:16px;display:flex;align-items:center;gap:14px;flex-wrap:wrap">
+      <div style="display:flex;align-items:center;gap:8px">
+        <div class="conn-dot" id="entrybot-dot"></div>
+        <span style="font-family:var(--mono);font-size:11px;color:var(--text2)" id="entrybot-status">ENTRY BOT 확인 중...</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:6px;margin-left:auto;flex-wrap:wrap">
+        <span style="font-family:var(--mono);font-size:9px;color:var(--muted)">진입금액</span>
+        <input type="number" id="entrybot-amount" value="50" min="1" step="1"
+               style="width:70px;font-family:var(--mono);font-size:11px;background:var(--bg3);border:1px solid var(--border2);color:var(--text);padding:4px 6px;outline:none">
+        <span style="font-family:var(--mono);font-size:9px;color:var(--muted)">USDT</span>
+        <span style="font-family:var(--mono);font-size:9px;color:var(--muted);margin-left:6px">배율</span>
+        <input type="number" id="entrybot-leverage" value="25" min="1" max="125" step="1"
+               style="width:55px;font-family:var(--mono);font-size:11px;background:var(--bg3);border:1px solid var(--border2);color:var(--text);padding:4px 6px;outline:none">
+        <span style="font-family:var(--mono);font-size:9px;color:var(--muted)">x</span>
+        <button class="sm-btn" onclick="saveEntryBotAmount()">저장</button>
+        <button class="sm-btn" id="entrybot-toggle-btn" onclick="toggleEntryBot()">— —</button>
+      </div>
+    </div>
     <div class="live-grid">
       <div class="live-cell"><div class="live-label">TRADES TODAY</div><div class="live-val" id="l-cnt">—</div></div>
       <div class="live-cell"><div class="live-label">REALIZED PNL</div><div class="live-val" id="l-pnl">—</div></div>
@@ -421,6 +444,45 @@ body{font-family:var(--sans);background:var(--bg);color:var(--text);min-height:1
     <div class="table-wrap">
       <div class="table-label">OPEN POSITIONS</div>
       <div id="pos-result"><div class="empty">NO OPEN POSITIONS</div></div>
+    </div>
+  </div>
+
+  <!-- 봇 신호 통계 -->
+  <div class="panel" id="p-signals">
+    <div class="panel-header">
+      <span class="panel-title">BOT SIGNALS</span>
+      <span class="panel-sub" id="signals-sub">SIGNAL ANALYTICS</span>
+    </div>
+
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:16px;flex-wrap:wrap">
+      <div class="period-tabs" style="margin:0">
+        <button class="ptab active" onclick="setSignalDays(7,this)">7D</button>
+        <button class="ptab" onclick="setSignalDays(30,this)">30D</button>
+        <button class="ptab" onclick="setSignalDays(90,this)">90D</button>
+      </div>
+      <label style="font-family:var(--mono);font-size:10px;color:var(--muted);display:flex;align-items:center;gap:5px;cursor:pointer">
+        <input type="checkbox" id="signals-live-only" onchange="loadSignalPanel()"> LIVE ONLY
+      </label>
+      <button class="sm-btn" onclick="syncSignalResults()" id="signals-sync-btn">SYNC RESULTS</button>
+    </div>
+
+    <div class="metrics" id="signals-metrics"></div>
+
+    <div class="table-wrap">
+      <div class="table-label">BY STRATEGY</div>
+      <div id="signals-by-strategy"></div>
+    </div>
+    <div class="table-wrap">
+      <div class="table-label">BY SYMBOL</div>
+      <div id="signals-by-symbol"></div>
+    </div>
+    <div class="table-wrap">
+      <div class="table-label">BY HOUR (KST)</div>
+      <div id="signals-by-hour"></div>
+    </div>
+    <div class="table-wrap">
+      <div class="table-label">RECENT SIGNALS</div>
+      <div id="signals-recent"></div>
     </div>
   </div>
 
@@ -444,6 +506,10 @@ body{font-family:var(--sans);background:var(--bg);color:var(--text);min-height:1
   <button class="mobile-tab" id="mtab-trades" onclick="switchPanel('trades')">
     <span class="mobile-tab-icon">⚡</span>
     <span>LIVE</span>
+  </button>
+  <button class="mobile-tab" id="mtab-signals" onclick="switchPanel('signals')">
+    <span class="mobile-tab-icon">📡</span>
+    <span>SIGNALS</span>
   </button>
 </nav>
 
@@ -523,7 +589,7 @@ body{font-family:var(--sans);background:var(--bg);color:var(--text);min-height:1
 var SERVER='https://trading-journal-s09e.onrender.com';
 var ch=null,period='daily',calYear,calMonth,editingId=null;
 var journalData=[];
-var todayTimer=null,posTimer=null;
+var refreshTimers=[];  // 자동갱신 인터벌 ID 배열 (기존 2변수 방식은 4개 중 2개가 유실되는 누수 버그)
 var n=new Date();calYear=n.getFullYear();calMonth=n.getMonth();
 
 function todayKST(){var d=new Date();return new Date(d.getTime()+9*3600000).toISOString().split('T')[0];}
@@ -830,17 +896,87 @@ function refreshGuardianStatus(){
     });
 }
 
+var entryBotAmountLoaded=false;
+
+function refreshEntryBotStatus(){
+  fetch(SERVER+'/api/entrybot/status',{signal:AbortSignal.timeout(5000)})
+    .then(function(r){return r.json();})
+    .then(function(d){
+      var dot=document.getElementById('entrybot-dot');
+      var status=document.getElementById('entrybot-status');
+      var btn=document.getElementById('entrybot-toggle-btn');
+      if(!d.ok){
+        dot.className='conn-dot off';
+        status.textContent='ENTRY BOT 오류: '+(d.msg||'알수없음');
+        return;
+      }
+      if(d.running){
+        dot.className='conn-dot on';
+        var sig=d.signal?(' | 신호:'+d.signal):'';
+        status.textContent='ENTRY BOT 실행 중 — '+(d.symbol||'—')+' '+(d.phase||'').toUpperCase()+sig;
+        btn.textContent='■ 정지';
+        btn.style.color='var(--red)'; btn.style.borderColor='var(--red)';
+      } else {
+        dot.className='conn-dot off';
+        status.textContent='ENTRY BOT 정지됨';
+        btn.textContent='▶ 시작';
+        btn.style.color='var(--green)'; btn.style.borderColor='var(--green)';
+      }
+      if(!entryBotAmountLoaded){
+        if(d.usdt_amount)document.getElementById('entrybot-amount').value=d.usdt_amount;
+        if(d.leverage)document.getElementById('entrybot-leverage').value=d.leverage;
+        entryBotAmountLoaded=true;
+      }
+    }).catch(function(){
+      document.getElementById('entrybot-dot').className='conn-dot off';
+      document.getElementById('entrybot-status').textContent='ENTRY BOT 연결 실패';
+    });
+}
+
+function toggleEntryBot(){
+  var btn=document.getElementById('entrybot-toggle-btn');
+  var isRunning=btn.textContent.indexOf('정지')>=0;
+  fetch(SERVER+'/api/entrybot/config',{
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({running:!isRunning})
+  }).then(function(r){return r.json();})
+    .then(function(d){if(d.ok)setTimeout(refreshEntryBotStatus,300);})
+    .catch(function(){alert('설정 변경 실패');});
+}
+
+function saveEntryBotAmount(){
+  var amount=parseFloat(document.getElementById('entrybot-amount').value);
+  var leverage=parseInt(document.getElementById('entrybot-leverage').value);
+  if(isNaN(amount)||amount<=0){alert('올바른 금액을 입력해주세요.');return;}
+  if(isNaN(leverage)||leverage<=0||leverage>125){alert('레버리지는 1~125 사이로 입력해주세요.');return;}
+  fetch(SERVER+'/api/entrybot/config',{
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({usdt_amount:amount,leverage:leverage})
+  }).then(function(r){return r.json();})
+    .then(function(d){
+      if(d.ok){
+        alert('진입 금액 '+d.usdt_amount+' USDT / 레버리지 '+d.leverage+'x로 저장됐어요.');
+      } else {
+        alert('저장 실패: '+(d.msg||''));
+      }
+    }).catch(function(){alert('저장 실패');});
+}
+
 function startAutoRefresh(){
   stopAutoRefresh();
-  refreshToday();refreshPositions();refreshGuardianStatus();
-  todayTimer=setInterval(refreshToday,30000);
-  posTimer=setInterval(refreshPositions,15000);
-  todayTimer=setInterval(refreshGuardianStatus,20000);
+  refreshToday();refreshPositions();refreshGuardianStatus();refreshEntryBotStatus();
+  refreshTimers=[
+    setInterval(refreshToday,30000),
+    setInterval(refreshPositions,15000),
+    setInterval(refreshGuardianStatus,20000),
+    setInterval(refreshEntryBotStatus,20000)
+  ];
 }
 function stopAutoRefresh(){
-  if(todayTimer)clearInterval(todayTimer);
-  if(posTimer)clearInterval(posTimer);
-  todayTimer=null;posTimer=null;
+  refreshTimers.forEach(function(t){clearInterval(t);});
+  refreshTimers=[];
 }
 
 function triggerBackfill(){
@@ -1170,7 +1306,7 @@ function renderHistory(){
 function renderAll(){renderBanner(journalData);renderMetrics(journalData);renderChart(journalData);renderRecent(journalData);}
 
 function switchPanel(panel){
-  var panels=['dashboard','calendar','history','trades'];
+  var panels=['dashboard','calendar','history','trades','signals'];
   // 사이드바 (데스크탑)
   document.querySelectorAll('.nav-item').forEach(function(el,i){el.classList.toggle('active',panels[i]===panel);});
   // 모바일 하단 탭바
@@ -1187,6 +1323,7 @@ function switchPanel(panel){
   if(panel==='calendar')loadJournal(function(){renderCalendar();});
   if(panel==='history')loadJournal(function(){renderHistory();});
   if(panel==='trades'){checkConn();loadGuardianPosConfig();startAutoRefresh();}
+  if(panel==='signals')loadSignalPanel();
   if(panel!=='trades')stopAutoRefresh();
 }
 
@@ -1194,6 +1331,112 @@ function switchPeriod(p){
   period=p;
   document.querySelectorAll('.ptab').forEach(function(t,i){t.classList.toggle('active',['daily','weekly','monthly'][i]===p);});
   renderChart(journalData);
+}
+
+/* ── BOT SIGNALS 패널 ── */
+var signalDays=7;
+
+function setSignalDays(d,btn){
+  signalDays=d;
+  btn.parentElement.querySelectorAll('.ptab').forEach(function(t){t.classList.toggle('active',t===btn);});
+  loadSignalPanel();
+}
+
+function sigPnlCls(v){return v>0?'pos':(v<0?'neg':'');}
+function sigFmtPnl(v){
+  if(v===null||v===undefined)return '<span style="color:var(--muted)">—</span>';
+  var s=(v>=0?'+':'')+v.toFixed(2);
+  return '<span class="'+sigPnlCls(v)+'" style="color:'+(v>0?'var(--green)':(v<0?'var(--red)':'var(--text2)'))+'">'+s+'</span>';
+}
+function sigFmtWr(row){
+  if(row.win_rate===null||row.win_rate===undefined)return '<span style="color:var(--muted)">—</span>';
+  var c=row.win_rate>=50?'var(--green)':'var(--red)';
+  return '<span style="color:'+c+'">'+row.win_rate+'%</span> <span style="color:var(--muted);font-size:10px">('+row.wins+'/'+row.closed+')</span>';
+}
+
+var STRATEGY_LABELS={donchian_breakout:'돈치안 브레이크아웃',stochrsi_ema50:'StochRSI+EMA50'};
+
+function renderSignalAgg(elId,rows,keyLabel,keyFmt){
+  var el=document.getElementById(elId);
+  if(!rows||!rows.length){el.innerHTML='<div style="padding:14px;font-family:var(--mono);font-size:11px;color:var(--muted)">데이터 없음</div>';return;}
+  var body=rows.map(function(r){
+    return '<tr><td>'+(keyFmt?keyFmt(r.key):r.key)+'</td>'+
+      '<td>'+r.signals+(r.live<r.signals?' <span style="color:var(--muted);font-size:10px">(live '+r.live+')</span>':'')+'</td>'+
+      '<td>'+r.closed+'</td>'+
+      '<td>'+sigFmtWr(r)+'</td>'+
+      '<td>'+sigFmtPnl(r.closed?r.pnl:null)+'</td></tr>';
+  }).join('');
+  el.innerHTML='<table class="data-table"><thead><tr><th>'+keyLabel+'</th><th>SIGNALS</th><th>CLOSED</th><th>WIN RATE</th><th>PNL (USDT)</th></tr></thead><tbody>'+body+'</tbody></table>';
+}
+
+function loadSignalPanel(){
+  var liveOnly=document.getElementById('signals-live-only').checked;
+  document.getElementById('signals-sub').textContent='LOADING...';
+
+  fetch(SERVER+'/api/signals/stats?days='+signalDays+'&live_only='+liveOnly,{signal:AbortSignal.timeout(8000)})
+    .then(function(r){return r.json();})
+    .then(function(d){
+      if(!d.ok){document.getElementById('signals-sub').textContent='ERROR: '+(d.msg||'');return;}
+      document.getElementById('signals-sub').textContent='LAST '+d.days+' DAYS'+(liveOnly?' · LIVE ONLY':'');
+      var t=d.total;
+      var wr=(t.win_rate===null)?'—':t.win_rate+'%';
+      var wrColor=(t.win_rate===null)?'':(t.win_rate>=50?' pos':' neg');
+      document.getElementById('signals-metrics').innerHTML=
+        '<div class="metric"><div class="m-label">TOTAL SIGNALS</div><div class="m-val">'+t.signals+'</div></div>'+
+        '<div class="metric"><div class="m-label">LIVE ENTRIES</div><div class="m-val">'+t.live+'</div></div>'+
+        '<div class="metric"><div class="m-label">CLOSED</div><div class="m-val">'+t.closed+'</div></div>'+
+        '<div class="metric"><div class="m-label">WIN RATE</div><div class="m-val'+wrColor+'">'+wr+'</div></div>'+
+        '<div class="metric"><div class="m-label">REALIZED PNL</div><div class="m-val '+sigPnlCls(t.pnl)+'">'+(t.closed?((t.pnl>=0?'+':'')+t.pnl.toFixed(2)):'—')+'</div></div>';
+
+      renderSignalAgg('signals-by-strategy',d.by_strategy,'STRATEGY',function(k){return STRATEGY_LABELS[k]||k;});
+      renderSignalAgg('signals-by-symbol',d.by_symbol,'SYMBOL',function(k){return k.replace('-USDT-SWAP','');});
+      var hours=(d.by_hour||[]).slice().sort(function(a,b){return parseInt(a.key)-parseInt(b.key);});
+      renderSignalAgg('signals-by-hour',hours,'HOUR',function(k){return String(k).padStart(2,'0')+':00';});
+    })
+    .catch(function(e){document.getElementById('signals-sub').textContent='ERROR: '+e.message;});
+
+  fetch(SERVER+'/api/signals?days='+signalDays+'&limit=50',{signal:AbortSignal.timeout(8000)})
+    .then(function(r){return r.json();})
+    .then(function(d){
+      var el=document.getElementById('signals-recent');
+      if(!d.ok||!d.signals.length){el.innerHTML='<div style="padding:14px;font-family:var(--mono);font-size:11px;color:var(--muted)">신호 없음 — 봇이 진입하면 여기에 쌓입니다</div>';return;}
+      var body=d.signals.map(function(s){
+        var m=s.meta||{};
+        var dirColor=m.signal==='long'?'var(--green)':'var(--red)';
+        var dirLabel=m.signal==='long'?'LONG':'SHORT';
+        var result=s.result?s.result.toUpperCase():(m.dry_run?'<span style="color:var(--muted)">DRY</span>':'<span style="color:var(--yellow)">OPEN</span>');
+        return '<tr>'+
+          '<td style="white-space:nowrap">'+s.created_at.slice(5,16)+'</td>'+
+          '<td>'+s.symbol.replace('-USDT-SWAP','')+'</td>'+
+          '<td style="color:'+dirColor+'">'+dirLabel+'</td>'+
+          '<td>'+(STRATEGY_LABELS[m.strategy]||m.strategy||'—')+'</td>'+
+          '<td>'+(m.regime||'—')+'</td>'+
+          '<td>'+(m.atr_pct!=null?m.atr_pct+'%':'—')+'</td>'+
+          '<td>'+(m.volume_ratio!=null?m.volume_ratio+'x':'—')+'</td>'+
+          '<td>'+result+'</td>'+
+          '<td>'+sigFmtPnl(s.pnl_usdt)+'</td>'+
+        '</tr>';
+      }).join('');
+      el.innerHTML='<table class="data-table"><thead><tr><th>TIME</th><th>SYM</th><th>SIDE</th><th>STRATEGY</th><th>REGIME</th><th>ATR</th><th>VOL</th><th>RESULT</th><th>PNL</th></tr></thead><tbody>'+body+'</tbody></table>';
+    })
+    .catch(function(){});
+}
+
+function syncSignalResults(){
+  var btn=document.getElementById('signals-sync-btn');
+  btn.disabled=true;btn.textContent='SYNCING...';
+  fetch(SERVER+'/api/signals/sync',{method:'POST',signal:AbortSignal.timeout(15000)})
+    .then(function(r){return r.json();})
+    .then(function(d){
+      btn.disabled=false;btn.textContent='SYNC RESULTS';
+      if(d.ok){
+        document.getElementById('signals-sub').textContent='SYNC: '+d.matched+'건 매칭'+(d.pending?', '+d.pending+'건 대기':'');
+        loadSignalPanel();
+      }else{
+        document.getElementById('signals-sub').textContent='SYNC ERROR: '+(d.msg||'');
+      }
+    })
+    .catch(function(e){btn.disabled=false;btn.textContent='SYNC RESULTS';document.getElementById('signals-sub').textContent='SYNC ERROR: '+e.message;});
 }
 
 /* ── 초기화 ── */

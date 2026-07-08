@@ -125,6 +125,29 @@ class OKXClient:
         self.key = cfg["api_key"]
         self.sec = cfg["api_secret"]
         self.pp  = cfg["passphrase"]
+        self._tick_cache = {}   # instId → tickSz 문자열 (심볼별 가격 소수점)
+
+    def get_tick_size(self, inst_id):
+        """계약 tickSz 조회·캐싱. 실패 시 '0.0001' 폴백."""
+        if inst_id in self._tick_cache:
+            return self._tick_cache[inst_id]
+        d = self._req("GET", "/api/v5/public/instruments",
+                      {"instType": "SWAP", "instId": inst_id})
+        tick = "0.0001"
+        try:
+            if d.get("code") == "0" and d.get("data"):
+                tick = d["data"][0].get("tickSz", tick) or tick
+        except Exception:
+            pass
+        self._tick_cache[inst_id] = tick
+        return tick
+
+    def fmt_px(self, inst_id, price):
+        """tickSz 소수 자릿수에 맞춰 가격 문자열 생성.
+        기존 하드코딩 ':.4f'는 가격 0.0001 미만 코인에서 0.0000이 되는 버그가 있었음."""
+        tick = self.get_tick_size(inst_id)
+        decimals = len(tick.split(".")[1]) if "." in tick else 0
+        return f"{price:.{decimals}f}"
 
     def _ts(self):
         return datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
@@ -255,11 +278,11 @@ class OKXClient:
         """
         body = {"instId": inst_id, "algoId": algo_id}
         if sl_price:
-            body["newSlTriggerPx"]     = f"{sl_price:.4f}"
+            body["newSlTriggerPx"]     = self.fmt_px(inst_id, sl_price)
             body["newSlOrdPx"]         = "-1"
             body["newSlTriggerPxType"] = "mark"
         if tp_price:
-            body["newTpTriggerPx"]     = f"{tp_price:.4f}"
+            body["newTpTriggerPx"]     = self.fmt_px(inst_id, tp_price)
             body["newTpOrdPx"]         = "-1"
             body["newTpTriggerPxType"] = "mark"
         log.info(f"AMEND 요청: algoId={algo_id} SL={sl_price} TP={tp_price}")
@@ -308,11 +331,11 @@ class OKXClient:
             "closeFraction": "1",
         }
         if sl_price:
-            body["slTriggerPx"]     = f"{sl_price:.4f}"
+            body["slTriggerPx"]     = self.fmt_px(inst_id, sl_price)
             body["slOrdPx"]         = "-1"
             body["slTriggerPxType"] = "mark"
         if tp_price:
-            body["tpTriggerPx"]     = f"{tp_price:.4f}"
+            body["tpTriggerPx"]     = self.fmt_px(inst_id, tp_price)
             body["tpOrdPx"]         = "-1"
             body["tpTriggerPxType"] = "mark"
 
@@ -786,6 +809,32 @@ def get_pos_enabled_from_db(pos_key):
         except Exception:
             pass
 
+def get_guardian_running_from_db():
+    """
+    전체 Guardian ON/OFF를 DB에서 조회 (포지션 설정과 같은 5초 캐시 사이클 재사용).
+    설정 없거나 DB 실패 시 현재 메모리값 유지 — 재배포 후에도 OFF 상태가 보존된다.
+    """
+    global guardian_running
+    conn = _get_db_connection()
+    if conn is None:
+        return guardian_running
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT value FROM settings WHERE key = %s", ("guardian_running",))
+                row = cur.fetchone()
+        if row is not None:
+            guardian_running = (row[0] == "true")
+        return guardian_running
+    except Exception as e:
+        log.warning(f"[DB] guardian_running 조회 실패: {e}")
+        return guardian_running
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
 # ─── 포지션 가디언 ──────────────────────────────────────
 class PositionGuardian:
     def __init__(self, cfg):
@@ -1082,7 +1131,10 @@ class PositionGuardian:
     def _check_emergency_exit(self, pos):
         # OKX가 빈 문자열을 보내는 경우 방어 처리
         try:
+            # isolated는 margin, cross는 margin이 빈 문자열이라 imr(초기증거금) 폴백
             margin = float(pos.get("margin", 0) or 0)
+            if margin <= 0:
+                margin = float(pos.get("imr", 0) or 0)
             upl    = float(pos.get("upl", 0) or 0)
         except (ValueError, TypeError):
             return False
@@ -1094,13 +1146,27 @@ class PositionGuardian:
     def run_once(self):
         global guardian_running
 
-        # 온/오프 체크
+        # 온/오프 체크 (30초마다 DB 재확인 — 재배포/멀티프로세스에도 일관성 유지)
+        now = time.time()
+        if now - getattr(self, "_running_check_ts", 0) > 30:
+            get_guardian_running_from_db()
+            self._running_check_ts = now
         if not guardian_running:
             log.info("[Guardian] 일시정지 상태 — 루프 건너뜀")
             return
 
         positions = self._fetch_positions()
         ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        # ── 청산된 포지션의 잔여 state 정리 ──
+        # current_sl(래칫)·trail_high/low·_own_algo_id가 남아 있으면
+        # 같은 심볼·방향 재진입 시 이전 포지션의 SL/트레일 기준을 물려받아 즉시 오작동한다.
+        live_keys = {f"{p.get('instId','')}-{p.get('posSide','')}" for p in positions}
+        stale = [k for k in self.state.get("positions", {}) if k not in live_keys]
+        for k in stale:
+            del self.state["positions"][k]
+            self._algo_cache.pop(k, None)
+            log.info(f"  🧹 청산된 포지션 state 정리: {k}")
 
         if not positions:
             log.info(f"[{ts}] 감시 중인 오픈 포지션 없음")
@@ -1116,6 +1182,18 @@ class PositionGuardian:
             side     = pos.get("posSide", "long")
             pos_key  = f"{inst_id}-{side}"
             symbol   = inst_id.replace("-USDT-SWAP", "")
+
+            # ── 긴급 손절 체크 — 포지션별 ON/OFF와 무관하게 항상 최우선 실행 ──
+            # (기존 버그: pos_enabled continue가 먼저 와서 Guardian OFF 포지션은
+            #  마진 80% 손실 긴급청산도 같이 꺼졌음)
+            if self._check_emergency_exit(pos):
+                log.warning(f"  🚨 {inst_id} {side.upper()}: 마진 대비 손실 한도 초과 — 긴급 청산!")
+                if not self.dry:
+                    res = self.client.close_position_market(inst_id, side)
+                    log.warning(f"     긴급 청산 결과: {res}")
+                else:
+                    log.warning("     [DRY-RUN] 긴급 청산 생략")
+                continue
 
             # ── 포지션별 ON/OFF 체크 (DB 직접 조회 — 프로세스 간 일관성 보장) ──
             pos_enabled = get_pos_enabled_from_db(pos_key)
@@ -1147,16 +1225,6 @@ class PositionGuardian:
             analysis = self._analyze_symbol(inst_id, side)
             if analysis is None:
                 log.warning(f"  {inst_id}: 캔들 데이터 부족 — 건너뜀")
-                continue
-
-            # 긴급 손절 체크 (온/오프 상관없이 항상 실행)
-            if self._check_emergency_exit(pos):
-                log.warning(f"  🚨 {inst_id} {side.upper()}: 마진 대비 손실 한도 초과 — 긴급 청산!")
-                if not self.dry:
-                    res = self.client.close_position_market(inst_id, side)
-                    log.warning(f"     긴급 청산 결과: {res}")
-                else:
-                    log.warning("     [DRY-RUN] 긴급 청산 생략")
                 continue
 
             # 기존 SL/TP 조회 (캐싱)
