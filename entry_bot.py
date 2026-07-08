@@ -509,6 +509,35 @@ def save_last_signal_to_db(symbol, signal):
         except Exception: pass
 
 
+def disable_guardian_for_position(symbol, pos_side):
+    """
+    봇이 진입한 포지션은 Guardian의 동적 SL/TP 관리를 끈다.
+    → 진입 당시 설정(ATR SL/TP + 봇 자체 트레일링)만 적용됨.
+    Guardian의 긴급청산(마진 80% 손실)은 플래그와 무관하게 항상 동작하므로 안전망은 유지.
+    포지션 청산 시 Guardian의 stale 정리 로직이 이 플래그를 삭제해,
+    이후 같은 심볼·방향 '수동' 진입은 다시 Guardian 관리를 받는다.
+    대시보드에서 수동으로 다시 켜는 것도 가능 (플래그를 true로 토글).
+    """
+    conn = _get_db_connection()
+    if conn is None:
+        log.warning(f"[{symbol}] guardian 플래그 기록 실패 (DB 연결 없음) — Guardian이 관리하게 됨")
+        return
+    try:
+        pos_key = f"{symbol}-{pos_side}"
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO settings (key, value) VALUES (%s, 'false')
+                    ON CONFLICT (key) DO UPDATE SET value = 'false'
+                """, (f"guardian_pos:{pos_key}",))
+        log.info(f"  🛡️ [{pos_key}] Guardian OFF — 진입 시 설정(SL/TP/트레일링)만 적용")
+    except Exception as e:
+        log.warning(f"[DB] guardian 플래그 기록 실패: {e}")
+    finally:
+        try: conn.close()
+        except Exception: pass
+
+
 # ─── 메인 봇 ────────────────────────────────────────────
 class EntryBot:
     def __init__(self, cfg):
@@ -878,6 +907,9 @@ class EntryBot:
                         if is_trend and res.get("code") == "0":
                             ss["trail_high"] = price if signal == "long"  else None
                             ss["trail_low"]  = price if signal == "short" else None
+                        if res.get("code") == "0":
+                            # 봇 진입 포지션은 Guardian 동적 관리 제외 (진입 설정만 적용)
+                            disable_guardian_for_position(sym, pos_side_okx)
                 else:
                     log.info("  [DRY-RUN] 실주문 생략")
 
