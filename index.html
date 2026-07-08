@@ -1392,7 +1392,7 @@ function loadSignalPanel(){
         '<div class="metric"><div class="m-label">WIN RATE</div><div class="m-val'+wrColor+'">'+wr+'</div></div>'+
         '<div class="metric"><div class="m-label">REALIZED PNL</div><div class="m-val '+sigPnlCls(t.pnl)+'">'+(t.closed?((t.pnl>=0?'+':'')+t.pnl.toFixed(2)):'—')+'</div></div>';
 
-      var EXIT_LABELS={tp:'TP 도달 ✓',sl:'SL 도달 ✗',manual:'수동/가디언 청산',liquidation:'강제청산 🚨',adl:'ADL',closed:'청산(미분류)',full_close:'청산(미분류)',partial_close:'부분청산'};
+      var EXIT_LABELS={order_failed:'주문 실패 ⚠',tp:'TP 도달 ✓',sl:'SL 도달 ✗',manual:'수동/가디언 청산',liquidation:'강제청산 🚨',adl:'ADL',closed:'청산(미분류)',full_close:'청산(미분류)',partial_close:'부분청산'};
       renderSignalAgg('signals-by-result',d.by_result,'EXIT',function(k){return EXIT_LABELS[k]||k;});
       renderSignalAgg('signals-by-strategy',d.by_strategy,'STRATEGY',function(k){return STRATEGY_LABELS[k]||k;});
       renderSignalAgg('signals-by-symbol',d.by_symbol,'SYMBOL',function(k){return k.replace('-USDT-SWAP','');});
@@ -1412,6 +1412,7 @@ function loadSignalPanel(){
         return isNaN(n)?'—':n.toLocaleString(undefined,{maximumFractionDigits:6});
       };
       var RESULT_LABELS={
+        order_failed:'<span style="color:var(--red);font-weight:600">FAIL ⚠</span>',
         tp:'<span style="color:var(--green);font-weight:500">TP ✓</span>',
         sl:'<span style="color:var(--red);font-weight:500">SL ✗</span>',
         manual:'<span style="color:var(--text2)">MANUAL</span>',

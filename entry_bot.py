@@ -447,8 +447,9 @@ def ensure_signals_table():
         except Exception:
             pass
 
-def record_signal(symbol, ord_id, meta):
-    """진입 신호 메타데이터를 DB에 기록. 실패해도 매매는 계속 진행."""
+def record_signal(symbol, ord_id, meta, result=None):
+    """진입 신호 메타데이터를 DB에 기록. 실패해도 매매는 계속 진행.
+    result: 주문 실패 등 확정 결과가 있으면 즉시 기록 (없으면 NULL → sync가 채움)"""
     conn = _get_db_connection()
     if conn is None:
         log.warning("[신호태깅] DB 연결 없음 — 기록 생략")
@@ -457,8 +458,8 @@ def record_signal(symbol, ord_id, meta):
         with conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "INSERT INTO bot_signals (ord_id, symbol, meta) VALUES (%s, %s, %s)",
-                    (ord_id, symbol, json.dumps(meta, ensure_ascii=False, default=str)))
+                    "INSERT INTO bot_signals (ord_id, symbol, meta, result) VALUES (%s, %s, %s, %s)",
+                    (ord_id, symbol, json.dumps(meta, ensure_ascii=False, default=str), result))
         log.info(f"[신호태깅] 기록 완료: {symbol} ordId={ord_id}")
     except Exception as e:
         log.warning(f"[신호태깅] 기록 실패: {e}")
@@ -467,6 +468,45 @@ def record_signal(symbol, ord_id, meta):
             conn.close()
         except Exception:
             pass
+
+
+# ─── last_signal 영속화 (재배포 시 중복 신호 방지) ─────────
+def load_last_signals_from_db(symbols):
+    """settings 테이블에서 심볼별 last_signal 복원.
+    Render 재배포로 state 파일이 초기화돼도 같은 신호를 다시 기록하지 않도록 DB가 진실."""
+    conn = _get_db_connection()
+    if conn is None:
+        return {}
+    try:
+        keys = [f"entry_last_signal:{s}" for s in symbols]
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT key, value FROM settings WHERE key = ANY(%s)", (keys,))
+                rows = dict(cur.fetchall())
+        return {k.split(":", 1)[1]: v for k, v in rows.items() if v in ("long", "short")}
+    except Exception as e:
+        log.warning(f"[DB] last_signal 복원 실패: {e}")
+        return {}
+    finally:
+        try: conn.close()
+        except Exception: pass
+
+def save_last_signal_to_db(symbol, signal):
+    conn = _get_db_connection()
+    if conn is None:
+        return
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO settings (key, value) VALUES (%s, %s)
+                    ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+                """, (f"entry_last_signal:{symbol}", signal))
+    except Exception as e:
+        log.warning(f"[DB] last_signal 저장 실패: {e}")
+    finally:
+        try: conn.close()
+        except Exception: pass
 
 
 # ─── 메인 봇 ────────────────────────────────────────────
@@ -805,32 +845,44 @@ class EntryBot:
                 }
 
                 ord_id = None
+                signal_result = None   # 주문 실패 시 'order_failed'로 즉시 확정
                 if not self.dry:
                     size = self._calc_size(sym, price, bot_cfg["usdt_amount"], bot_cfg["leverage"])
                     if size is None:
-                        log.warning(f"[{sym}] 수량 계산 실패 — 진입 취소")
-                        return open_pos
-                    signal_meta["size"] = size
-                    res = self.client.place_order(
-                        sym, self.cfg["td_mode"],
-                        side_okx, pos_side_okx, size,
-                        tp_price=tp_price, sl_price=sl_price)
-                    log.info(f"  주문 결과: code={res.get('code')} | {res.get('data')}")
-                    try:
-                        ord_id = res.get("data", [{}])[0].get("ordId")
-                    except Exception:
-                        ord_id = None
-                    if res.get("code") != "0":
-                        log.warning(f"[{sym}] 주문 실패 — 신호는 태깅하되 result='order_failed' 처리")
+                        # 조기 return하면 신호 기록·last_signal 갱신을 건너뛰어
+                        # 매 루프 같은 신호로 재시도(로그 스팸)하게 되므로 실패로 기록하고 계속 진행
+                        log.warning(f"[{sym}] 수량 계산 실패 — result='order_failed'로 기록")
                         signal_meta["order_failed"] = True
-                    if is_trend and res.get("code") == "0":
-                        ss["trail_high"] = price if signal == "long"  else None
-                        ss["trail_low"]  = price if signal == "short" else None
+                        signal_meta["fail_msg"] = "수량 계산 실패 (진입 금액 부족 또는 계약 스펙 조회 실패)"
+                        signal_result = "order_failed"
+                    else:
+                        signal_meta["size"] = size
+                        res = self.client.place_order(
+                            sym, self.cfg["td_mode"],
+                            side_okx, pos_side_okx, size,
+                            tp_price=tp_price, sl_price=sl_price)
+                        log.info(f"  주문 결과: code={res.get('code')} | {res.get('data')}")
+                        try:
+                            ord_id = res.get("data", [{}])[0].get("ordId")
+                        except Exception:
+                            ord_id = None
+                        if res.get("code") != "0":
+                            log.warning(f"[{sym}] 주문 실패 — result='order_failed'로 기록")
+                            signal_meta["order_failed"] = True
+                            signal_meta["fail_msg"] = str(res.get("msg", ""))[:200]
+                            try:
+                                signal_meta["fail_detail"] = str(res.get("data", [{}])[0].get("sMsg", ""))[:200]
+                            except Exception:
+                                pass
+                            signal_result = "order_failed"
+                        if is_trend and res.get("code") == "0":
+                            ss["trail_high"] = price if signal == "long"  else None
+                            ss["trail_low"]  = price if signal == "short" else None
                 else:
                     log.info("  [DRY-RUN] 실주문 생략")
 
                 # 신호 태깅 (dry-run 포함 — 필터 검증 데이터로 활용)
-                record_signal(sym, ord_id, signal_meta)
+                record_signal(sym, ord_id, signal_meta, signal_result)
 
                 self.state["trades"].append({
                     "time": ts, "symbol": sym, "signal": signal, "price": price,
@@ -847,6 +899,8 @@ class EntryBot:
 
         # last_signal은 진입 성공 여부와 무관하게 갱신 (같은 신호 반복 진입 방지)
         if signal:
+            if ss.get("last_signal") != signal:
+                save_last_signal_to_db(sym, signal)   # 재배포 대비 DB 영속화
             ss["last_signal"] = signal
 
         return open_pos
@@ -896,6 +950,13 @@ class EntryBot:
         entry_bot_instance = self
 
         ensure_signals_table()
+
+        # 재배포로 state 파일이 초기화돼도 DB의 last_signal이 진실
+        restored = load_last_signals_from_db(self.cfg["symbols"])
+        for sym, sig in restored.items():
+            self._sym_state(sym)["last_signal"] = sig
+        if restored:
+            log.info(f" last_signal DB 복원: {restored}")
 
         log.info("=" * 55)
         log.info(" OKX 하이브리드 자동매매 봇 시작 (진입 신호 전용) v2")
