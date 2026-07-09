@@ -477,6 +477,10 @@ body{font-family:var(--sans);background:var(--bg);color:var(--text);min-height:1
       <div id="signals-by-result"></div>
     </div>
     <div class="table-wrap">
+      <div class="table-label">EXCURSION — 결과별 MFE/MAE (TP·SL 튜닝 근거)</div>
+      <div id="signals-excursion"></div>
+    </div>
+    <div class="table-wrap">
       <div class="table-label">BY STRATEGY</div>
       <div id="signals-by-strategy"></div>
     </div>
@@ -1422,6 +1426,21 @@ function loadSignalPanel(){
 
       var EXIT_LABELS={order_failed:'주문 실패 ⚠',tp:'TP 도달 ✓',sl:'SL 도달 ✗',manual:'수동/가디언 청산',liquidation:'강제청산 🚨',adl:'ADL',closed:'청산(미분류)',full_close:'청산(미분류)',partial_close:'부분청산'};
       renderSignalAgg('signals-by-result',d.by_result,'EXIT',function(k){return EXIT_LABELS[k]||k;});
+      (function(){
+        var el=document.getElementById('signals-excursion');
+        var ex=d.excursion||[];
+        if(!ex.length){el.innerHTML='<div style="padding:14px;font-family:var(--mono);font-size:11px;color:var(--muted)">청산 완료 데이터가 쌓이면 표시됩니다</div>';return;}
+        var OUT_LABELS={tp:'TP 도달',sl:'SL 도달',manual:'수동/가디언',v_tp:'TP* (가상)',v_sl:'SL* (가상)',v_none:'미도달*',v_unknown:'판정불가*',liquidation:'강제청산',closed:'청산'};
+        var rows=ex.map(function(r){
+          return '<tr><td>'+(OUT_LABELS[r.outcome]||r.outcome)+'</td><td>'+r.n+'</td>'+
+            '<td style="color:var(--green)">'+(r.avg_mfe!==null?'+'+r.avg_mfe.toFixed(2)+'%':'—')+'</td>'+
+            '<td style="color:var(--red)">'+(r.avg_mae!==null?'-'+r.avg_mae.toFixed(2)+'%':'—')+'</td>'+
+            '<td style="color:var(--muted)">'+(r.max_mfe!==null?'+'+r.max_mfe.toFixed(2)+'%':'—')+'</td></tr>';
+        }).join('');
+        var hint='<div style="font-family:var(--mono);font-size:10px;color:var(--muted);margin-top:6px">'+
+          'SL행의 AVG MFE가 크면 → TP가 너무 멂 (벌다가 반납) · TP행의 AVG MAE가 작으면 → SL 좁혀도 됨 (승리 트레이드는 역행이 적음)</div>';
+        el.innerHTML='<table class="data-table"><thead><tr><th>OUTCOME</th><th>N</th><th>AVG MFE</th><th>AVG MAE</th><th>MAX MFE</th></tr></thead><tbody>'+rows+'</tbody></table>'+hint;
+      })();
       renderSignalAgg('signals-by-strategy',d.by_strategy,'STRATEGY',function(k){return STRATEGY_LABELS[k]||k;});
       renderSignalAgg('signals-by-symbol',d.by_symbol,'SYMBOL',function(k){return k.replace('-USDT-SWAP','');});
       var hours=(d.by_hour||[]).slice().sort(function(a,b){return parseInt(a.key)-parseInt(b.key);});
@@ -1489,11 +1508,12 @@ function loadSignalPanel(){
           '<td style="white-space:nowrap">'+nowCell+'</td>'+
           '<td style="color:var(--green)">'+fmtPx(m.tp_price)+(m.tp_pct!=null?' <span style="color:var(--muted);font-size:10px">+'+m.tp_pct+'%</span>':'')+'</td>'+
           '<td style="color:var(--red)">'+fmtPx(m.sl_price)+(m.sl_pct!=null?' <span style="color:var(--muted);font-size:10px">-'+m.sl_pct+'%</span>':'')+'</td>'+
+          '<td style="white-space:nowrap;font-size:11px">'+(s.mfe!==null&&s.mfe!==undefined?'<span style="color:var(--green)">+'+s.mfe.toFixed(2)+'</span>/<span style="color:var(--red)">-'+(s.mae!==null?s.mae.toFixed(2):'?')+'</span>':'<span style="color:var(--muted)">—</span>')+'</td>'+
           '<td>'+result+'</td>'+
           '<td>'+(s.pnl_usdt!==null&&s.pnl_usdt!==undefined?sigFmtPnl(s.pnl_usdt):(s.v_pnl!==null&&s.v_pnl!==undefined?'<span style="color:'+(s.v_pnl>0?'var(--green)':'var(--red)')+';font-size:11px">'+(s.v_pnl>0?'+':'')+s.v_pnl.toFixed(2)+'%*</span>':'<span style="color:var(--muted)">—</span>'))+'</td>'+
         '</tr>';
       }).join('');
-      el.innerHTML='<table class="data-table"><thead><tr><th>TIME</th><th>SYM</th><th>SIDE</th><th>STRATEGY</th><th>ENTRY</th><th>NOW</th><th>TP</th><th>SL</th><th>RESULT</th><th>PNL</th></tr></thead><tbody>'+body+'</tbody></table>';
+      el.innerHTML='<table class="data-table"><thead><tr><th>TIME</th><th>SYM</th><th>SIDE</th><th>STRATEGY</th><th>ENTRY</th><th>NOW</th><th>TP</th><th>SL</th><th>MFE/MAE</th><th>RESULT</th><th>PNL</th></tr></thead><tbody>'+body+'</tbody></table>';
     })
     .catch(function(){});
 }

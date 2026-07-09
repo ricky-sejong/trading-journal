@@ -1231,6 +1231,9 @@ def ensure_signals_table():
                 # 가상 판정 (DRY/주문실패 신호를 캔들 재생으로 TP/SL 판정)
                 cur.execute('ALTER TABLE bot_signals ADD COLUMN IF NOT EXISTS v_result TEXT')
                 cur.execute('ALTER TABLE bot_signals ADD COLUMN IF NOT EXISTS v_pnl NUMERIC')
+                # MFE/MAE: 진입~청산 구간의 최대 유리/불리 이동폭 (가격 %, TP/SL 튜닝 근거)
+                cur.execute('ALTER TABLE bot_signals ADD COLUMN IF NOT EXISTS mfe_pct NUMERIC')
+                cur.execute('ALTER TABLE bot_signals ADD COLUMN IF NOT EXISTS mae_pct NUMERIC')
         _signals_table_ready = True
     except Exception as e:
         print(f'[signals] 테이블 준비 실패: {e}')
@@ -1245,7 +1248,7 @@ def get_signals():
         symbol   = request.args.get('symbol')
         strategy = request.args.get('strategy')
 
-        q = '''SELECT id, ord_id, symbol, meta, result, pnl_usdt, created_at, v_result, v_pnl
+        q = '''SELECT id, ord_id, symbol, meta, result, pnl_usdt, created_at, v_result, v_pnl, mfe_pct, mae_pct
                FROM bot_signals
                WHERE created_at > now() - (%s || ' days')::interval'''
         args = [str(days)]
@@ -1264,6 +1267,8 @@ def get_signals():
             'result': r[4], 'pnl_usdt': float(r[5]) if r[5] is not None else None,
             'created_at': r[6].astimezone(KST).strftime('%Y-%m-%d %H:%M:%S'),
             'v_result': r[7], 'v_pnl': float(r[8]) if r[8] is not None else None,
+            'mfe': float(r[9]) if r[9] is not None else None,
+            'mae': float(r[10]) if r[10] is not None else None,
         } for r in rows]
 
         # 미청산(OPEN/DRY) 신호가 있으면 해당 심볼들의 현재가를 함께 반환
@@ -1338,8 +1343,27 @@ def signal_stats():
             'v_closed': t[5], 'v_wins': t[6],
             'v_win_rate': round(t[6] / t[5] * 100, 1) if t[5] else None,
         }
+        # MFE/MAE 분포: 결과 유형별 평균/최대 (실거래+가상 통합, 캔들 기반이라 방법론 동일)
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(f'''SELECT COALESCE(result, v_result) AS outcome,
+                                       COUNT(*),
+                                       ROUND(AVG(mfe_pct), 3), ROUND(AVG(mae_pct), 3),
+                                       ROUND(MAX(mfe_pct), 3), ROUND(MAX(mae_pct), 3)
+                                FROM bot_signals
+                                WHERE {base_where} AND mfe_pct IS NOT NULL
+                                GROUP BY 1 ORDER BY 2 DESC''', (str(days),))
+                exc_rows = cur.fetchall()
+        excursion = [{
+            'outcome': r[0], 'n': r[1],
+            'avg_mfe': float(r[2]) if r[2] is not None else None,
+            'avg_mae': float(r[3]) if r[3] is not None else None,
+            'max_mfe': float(r[4]) if r[4] is not None else None,
+            'max_mae': float(r[5]) if r[5] is not None else None,
+        } for r in exc_rows if r[0] is not None]
+
         return jsonify({
-            'ok': True, 'days': days, 'total': total,
+            'ok': True, 'days': days, 'total': total, 'excursion': excursion,
             'by_strategy': agg("meta->>'strategy'"),
             'by_regime':   agg("meta->>'regime'"),
             'by_symbol':   agg('symbol'),
@@ -1374,6 +1398,35 @@ def _fetch_candles_since(inst_id, start_ms, bar='5m', max_pages=12):
     rows = [c for c in collected if int(c[0]) >= start_ms]
     rows.sort(key=lambda c: int(c[0]))   # 과거→현재
     return rows
+
+def _calc_excursion(candles, side, entry_price, end_ms=None):
+    """
+    캔들 리스트(과거→현재)에서 진입가 대비 MFE/MAE(가격 %) 계산.
+    MFE = 내 방향으로 최대 얼마나 가줬나 / MAE = 최대 얼마나 역행당했나 (둘 다 양수).
+    end_ms 지정 시 그 시각까지의 캔들만 반영 (청산 시각 캡).
+    """
+    if not candles or not entry_price or entry_price <= 0:
+        return None, None
+    hi = lo = None
+    for c in candles:
+        try:
+            ts = int(c[0])
+            if end_ms and ts > end_ms:
+                break
+            h, l = float(c[2]), float(c[3])
+        except (ValueError, TypeError, IndexError):
+            continue
+        hi = h if hi is None else max(hi, h)
+        lo = l if lo is None else min(lo, l)
+    if hi is None or lo is None:
+        return None, None
+    if side == 'long':
+        mfe = (hi - entry_price) / entry_price * 100
+        mae = (entry_price - lo) / entry_price * 100
+    else:
+        mfe = (entry_price - lo) / entry_price * 100
+        mae = (hi - entry_price) / entry_price * 100
+    return round(max(mfe, 0), 3), round(max(mae, 0), 3)
 
 def _virtual_eval_core(limit=20):
     """
@@ -1415,19 +1468,23 @@ def _virtual_eval_core(limit=20):
             tp_pct = float(meta.get('tp_pct', 0) or 0)
             sl_pct = float(meta.get('sl_pct', 0) or 0)
         except (ValueError, TypeError):
-            updates.append((sig_id, 'v_none', None))
+            updates.append((sig_id, 'v_none', None, None, None))
             continue
         if not entry_ms or side not in ('long', 'short') or tp <= 0 or sl <= 0:
-            updates.append((sig_id, 'v_none', None))
+            updates.append((sig_id, 'v_none', None, None, None))
             continue
 
         candles = _fetch_candles_since(symbol, entry_ms)
+        entry_price = float(meta.get('price', 0) or 0)
         verdict, v_pnl = None, None
+        hi = lo = None   # MFE/MAE용 극값 추적 (판정 캔들까지)
         for c in candles:
             try:
                 high, low = float(c[2]), float(c[3])
             except (ValueError, TypeError, IndexError):
                 continue
+            hi = high if hi is None else max(hi, high)
+            lo = low  if lo is None else min(lo, low)
             if side == 'long':
                 hit_tp, hit_sl = high >= tp, low <= sl
             else:
@@ -1446,15 +1503,23 @@ def _virtual_eval_core(limit=20):
                 verdict = 'v_none'
             else:
                 continue   # 아직 미판정 — 다음 실행 때 재시도
-        updates.append((sig_id, verdict, v_pnl))
+        mfe = mae = None
+        if entry_price > 0 and hi is not None:
+            if side == 'long':
+                mfe = round(max((hi - entry_price) / entry_price * 100, 0), 3)
+                mae = round(max((entry_price - lo) / entry_price * 100, 0), 3)
+            else:
+                mfe = round(max((entry_price - lo) / entry_price * 100, 0), 3)
+                mae = round(max((hi - entry_price) / entry_price * 100, 0), 3)
+        updates.append((sig_id, verdict, v_pnl, mfe, mae))
         evaluated += 1
 
     if updates:
         with get_db() as conn:
             with conn.cursor() as cur:
-                for sig_id, verdict, v_pnl in updates:
-                    cur.execute('UPDATE bot_signals SET v_result=%s, v_pnl=%s WHERE id=%s',
-                                (verdict, v_pnl, sig_id))
+                for sig_id, verdict, v_pnl, mfe, mae in updates:
+                    cur.execute('UPDATE bot_signals SET v_result=%s, v_pnl=%s, mfe_pct=%s, mae_pct=%s WHERE id=%s',
+                                (verdict, v_pnl, mfe, mae, sig_id))
     print(f'[virtual-eval] {evaluated}건 판정 (후보 {len(candidates)}건)')
     return {'evaluated': evaluated, 'pending': len(candidates) - evaluated}
 
@@ -1560,8 +1625,18 @@ def _sync_signals_core():
                 except (ValueError, TypeError):
                     pnl = 0.0
                 result = classify_close(h, meta)
-                cur.execute('UPDATE bot_signals SET result=%s, pnl_usdt=%s WHERE id=%s',
-                            (result, pnl, sig_id))
+                # MFE/MAE: 진입~청산 구간의 최대 유리/불리 이동폭
+                mfe = mae = None
+                try:
+                    close_ms = int(h.get('uTime', 0) or 0)
+                    entry_price = float(meta.get('price', 0) or 0)
+                    if close_ms and entry_price > 0:
+                        candles = _fetch_candles_since(symbol, entry_ms)
+                        mfe, mae = _calc_excursion(candles, side, entry_price, end_ms=close_ms)
+                except Exception as e:
+                    print(f'[signals-sync] MFE/MAE 계산 실패 #{sig_id}: {e}')
+                cur.execute('UPDATE bot_signals SET result=%s, pnl_usdt=%s, mfe_pct=%s, mae_pct=%s WHERE id=%s',
+                            (result, pnl, mfe, mae, sig_id))
                 matched += 1
 
     for d in diag:
