@@ -919,8 +919,13 @@ class PositionGuardian:
             #   추세(donchian_breakout) → Guardian의 구조 인식 트레일링이 관리 (아래 정상 경로)
             #   조회 안 됨 → 수동 포지션으로 간주, Guardian 기본 관리
             policy = bot_db.get_bot_policy(inst_id, side)
+            bot_trend_managed = bool(policy and policy.get("strategy") == "donchian_breakout")
+            if not hasattr(self, "_tagged_signals"):
+                self._tagged_signals = set()   # tag_exit_engine 중복 DB 호출 방지
             if policy and policy.get("strategy") == "stochrsi_ema50":
-                bot_db.tag_exit_engine(policy["signal_id"], "entry_fixed")
+                if policy["signal_id"] not in self._tagged_signals:
+                    bot_db.tag_exit_engine(policy["signal_id"], "entry_fixed")
+                    self._tagged_signals.add(policy["signal_id"])
                 log.info(f"  🤖 {symbol} {side.upper()}: 봇 횡보 진입 — 진입 SL/TP 고정 유지 (Guardian 감시만)")
                 try:
                     mark = float(pos.get("markPx", 0) or 0)
@@ -937,8 +942,10 @@ class PositionGuardian:
                     "tp_price": None, "tp_source": "봇 진입 고정 (range)",
                 })
                 continue
-            if policy and policy.get("strategy") == "donchian_breakout":
-                bot_db.tag_exit_engine(policy["signal_id"], "guardian")
+            if bot_trend_managed:
+                if policy["signal_id"] not in self._tagged_signals:
+                    bot_db.tag_exit_engine(policy["signal_id"], "guardian")
+                    self._tagged_signals.add(policy["signal_id"])
                 log.info(f"  🤖 {symbol} {side.upper()}: 봇 추세 진입 — Guardian 구조 트레일링 인수")
 
             # ── 포지션별 ON/OFF 체크 (DB 직접 조회 — 프로세스 간 일관성 보장) ──
@@ -987,6 +994,14 @@ class PositionGuardian:
 
             if is_own_order:
                 # Guardian이 건 주문 → skip 없이 항상 재계산/갱신
+                skip_sl = False
+                skip_tp = False
+            elif bot_trend_managed:
+                # 봇 추세 진입 — 봇이 attachAlgoOrds로 붙인 초기 TP/SL을 Guardian 소유로 인수.
+                # (이걸 사용자 주문으로 오인하면 '인수 선언'만 하고 트레일링이 영원히 안 돎)
+                if algo_id:
+                    self.state["positions"].setdefault(pos_key, {})["_own_algo_id"] = algo_id
+                    log.info(f"  🤝 {symbol} {side.upper()}: 봇 초기 TP/SL(algoId={algo_id}) Guardian 소유로 인수")
                 skip_sl = False
                 skip_tp = False
             else:
