@@ -780,36 +780,48 @@ class PositionGuardian:
             "last_update":     datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         })
 
-        # ── 4) TP 보정 — 최소 TP % + 최소 RR 보장 ──
-        raw_tp = struct.get("tp_price")
+        # ── 4) TP — 한 번 고정 (A안) ──
+        # 기존 방식(매 루프 mark 기준 재계산)은 TP가 가격을 따라 도망가서 영원히 안 닿고,
+        # 매 루프 amend를 유발했다. 이제 포지션당 한 번, 유효 후보 중 '가장 먼' 값으로 고정:
+        #   후보 = 피보나치 1.618 / 구조적 TP / 최소보장(pct·RR) — 실질 청산은 트레일링 SL이 담당.
+        # 가격이 고정 TP를 이미 넘어선 비정상 상황(체결 지연 등)에만 더 먼 값으로 재고정.
         min_tp_pct = cfg.get("min_tp_pct", 0.5) * lev_factor
         min_rr     = cfg.get("min_rr", 1.5)
 
-        if side == "long":
-            # 최소 TP 가격 (진입가 기준 0.5% 이상)
-            min_tp_by_pct = entry * (1 + min_tp_pct / 100)
-            # 최소 RR 보장 TP (SL 거리 × min_rr)
-            sl_dist_abs   = mark - new_sl
-            min_tp_by_rr  = mark + sl_dist_abs * min_rr
-            # 구조적 TP가 두 조건 모두 만족하면 그대로, 아니면 더 먼 값으로 보정
-            min_tp_floor  = max(min_tp_by_pct, min_tp_by_rr)
-            if raw_tp is None or raw_tp < min_tp_floor:
-                final_tp = min_tp_floor
-                tp_source = f"최소보장 TP (pct:{min_tp_pct}% / RR{min_rr}:1)"
+        locked = st.get("_tp_locked")
+        needs_lock = (locked is None or
+                      (side == "long"  and locked <= mark) or
+                      (side == "short" and locked >= mark))
+        if needs_lock:
+            fib = struct.get("fib", {}) or {}
+            candidates = []   # (가격, 출처)
+            raw_tp = struct.get("tp_price")
+            fib_tp = fib.get("1.618")
+            if side == "long":
+                min_tp_floor = max(entry * (1 + min_tp_pct / 100),
+                                   mark + (mark - new_sl) * min_rr)
+                candidates.append((min_tp_floor, f"최소보장 TP (pct:{min_tp_pct}% / RR{min_rr}:1)"))
+                if raw_tp and raw_tp > mark:
+                    candidates.append((raw_tp, "구조적 TP"))
+                if fib_tp and fib_tp > mark:
+                    candidates.append((fib_tp, "피보나치 1.618"))
+                final_tp, tp_source = max(candidates, key=lambda x: x[0])
             else:
-                final_tp = raw_tp
-                tp_source = "구조적 TP"
+                min_tp_ceil = min(entry * (1 - min_tp_pct / 100),
+                                  mark - (new_sl - mark) * min_rr)
+                candidates.append((min_tp_ceil, f"최소보장 TP (pct:{min_tp_pct}% / RR{min_rr}:1)"))
+                if raw_tp and raw_tp < mark:
+                    candidates.append((raw_tp, "구조적 TP"))
+                if fib_tp and fib_tp < mark:
+                    candidates.append((fib_tp, "피보나치 1.618"))
+                final_tp, tp_source = min(candidates, key=lambda x: x[0])
+            st["_tp_locked"] = final_tp
+            st["_tp_locked_source"] = tp_source
+            log.info(f"  🔒 {pos_key} TP 고정: {final_tp:.4f} ({tp_source}) — 이후 SL 변경 시에만 amend")
         else:
-            min_tp_by_pct = entry * (1 - min_tp_pct / 100)
-            sl_dist_abs   = new_sl - mark
-            min_tp_by_rr  = mark - sl_dist_abs * min_rr
-            min_tp_ceil   = min(min_tp_by_pct, min_tp_by_rr)
-            if raw_tp is None or raw_tp > min_tp_ceil:
-                final_tp = min_tp_ceil
-                tp_source = f"최소보장 TP (pct:{min_tp_pct}% / RR{min_rr}:1)"
-            else:
-                final_tp = raw_tp
-                tp_source = "구조적 TP"
+            final_tp  = locked
+            tp_source = st.get("_tp_locked_source", "고정 TP")
+        tp_source = tp_source + " [고정]" if "[고정]" not in tp_source else tp_source
 
         # RR 실제값 계산 (로그용)
         if side == "long":
