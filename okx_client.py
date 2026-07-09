@@ -219,39 +219,47 @@ class OKXClient:
         return d.get("data", [])
 
     # ── 주문 (가디언) ────────────────────────────────────
+    def _get_pending_algos(self, inst_id):
+        """pending 알고 주문 조회. ordType은 OKX 필수 파라미터(생략 시 51000)이며
+        TP/SL 동시 부착 주문은 'oco', 단독은 'conditional'이라 둘 다 조회해 병합."""
+        orders = []
+        for ord_type in ("conditional", "oco"):
+            d = self._req("GET", "/api/v5/trade/orders-algo-pending",
+                          {"instType": "SWAP", "instId": inst_id, "ordType": ord_type})
+            if d.get("code") == "0":
+                orders.extend(d.get("data", []))
+            else:
+                log.warning(f"orders-algo-pending({ord_type}) 조회 실패: {d.get('msg')}")
+        return orders
+
     def get_existing_tpsl(self, inst_id, pos_side):
         """해당 포지션의 기존 TP/SL 알고 주문 조회.
         반환: {'has_sl','has_tp','sl_price','tp_price','algo_id'}"""
         has_sl = False; has_tp = False
         sl_price = None; tp_price = None; algo_id = None
-        d = self._req("GET", "/api/v5/trade/orders-algo-pending",
-                      {"instType": "SWAP", "instId": inst_id})
-        if d.get("code") == "0":
-            for o in d.get("data", []):
-                o_pos_side = o.get("posSide", "")
-                if o_pos_side and o_pos_side != pos_side:
-                    continue
-                sl = o.get("slTriggerPx", "")
-                tp = o.get("tpTriggerPx", "")
-                if sl and float(sl) > 0:
-                    has_sl = True; sl_price = float(sl)
-                if tp and float(tp) > 0:
-                    has_tp = True; tp_price = float(tp)
-                if sl or tp:
-                    algo_id = o.get("algoId")
+        for o in self._get_pending_algos(inst_id):
+            o_pos_side = o.get("posSide", "")
+            if o_pos_side and o_pos_side != pos_side:
+                continue
+            sl = o.get("slTriggerPx", "")
+            tp = o.get("tpTriggerPx", "")
+            if sl and float(sl) > 0:
+                has_sl = True; sl_price = float(sl)
+            if tp and float(tp) > 0:
+                has_tp = True; tp_price = float(tp)
+            if sl or tp:
+                algo_id = o.get("algoId")
         return {"has_sl": has_sl, "has_tp": has_tp,
                 "sl_price": sl_price, "tp_price": tp_price, "algo_id": algo_id}
 
     def get_all_algo_ids(self, inst_id):
-        d = self._req("GET", "/api/v5/trade/orders-algo-pending",
-                      {"instType": "SWAP", "instId": inst_id})
-        log.info(f"orders-algo-pending 응답: code={d.get('code')} 건수={len(d.get('data', []))}")
+        orders = self._get_pending_algos(inst_id)
+        log.info(f"orders-algo-pending 병합 조회: 건수={len(orders)}")
         ids = []
-        if d.get("code") == "0":
-            for o in d.get("data", []):
-                aid = o.get("algoId")
-                if aid and aid not in ids:
-                    ids.append(aid)
+        for o in orders:
+            aid = o.get("algoId")
+            if aid and aid not in ids:
+                ids.append(aid)
         return ids
 
     def amend_tpsl(self, algo_id, inst_id, sl_price=None, tp_price=None):
