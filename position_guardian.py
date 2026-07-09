@@ -677,11 +677,11 @@ class PositionGuardian:
         # 레버리지 기반 거리 배율
         lev_factor, leverage = self._get_leverage_factor(pos)
 
-        st = self.state["positions"].setdefault(pos_key, {
-            "trail_high": entry if side == "long" else None,
-            "trail_low":  entry if side == "short" else None,
-            "current_sl": None,
-        })
+        st = self.state["positions"].setdefault(pos_key, {})
+        # 키별 보정: pos_key가 다른 경로(예: algo 소유권 인수)에서 부분 생성됐어도 안전
+        st.setdefault("trail_high", entry if side == "long" else None)
+        st.setdefault("trail_low",  entry if side == "short" else None)
+        st.setdefault("current_sl", None)
 
         pnl_pct = ((mark-entry)/entry*100) if side=="long" else ((entry-mark)/entry*100)
 
