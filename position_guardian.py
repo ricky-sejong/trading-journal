@@ -30,6 +30,11 @@ try:
 except Exception:
     pass
 
+# 공용 모듈 (okx_client.py / indicators.py / bot_db.py)
+from okx_client import OKXClient
+from indicators import calc_atr
+import bot_db
+
 # ─── 로깅 ───────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
@@ -118,307 +123,7 @@ def save_state(state):
 
 
 # ─── OKX REST 클라이언트 ─────────────────────────────────
-class OKXClient:
-    BASE = "https://www.okx.com"
-
-    def __init__(self, cfg):
-        self.key = cfg["api_key"]
-        self.sec = cfg["api_secret"]
-        self.pp  = cfg["passphrase"]
-        self._tick_cache = {}   # instId → tickSz 문자열 (심볼별 가격 소수점)
-
-    def get_tick_size(self, inst_id):
-        """계약 tickSz 조회·캐싱. 실패 시 '0.0001' 폴백."""
-        if inst_id in self._tick_cache:
-            return self._tick_cache[inst_id]
-        d = self._req("GET", "/api/v5/public/instruments",
-                      {"instType": "SWAP", "instId": inst_id})
-        tick = "0.0001"
-        try:
-            if d.get("code") == "0" and d.get("data"):
-                tick = d["data"][0].get("tickSz", tick) or tick
-        except Exception:
-            pass
-        self._tick_cache[inst_id] = tick
-        return tick
-
-    def fmt_px(self, inst_id, price):
-        """tickSz 소수 자릿수에 맞춰 가격 문자열 생성.
-        기존 하드코딩 ':.4f'는 가격 0.0001 미만 코인에서 0.0000이 되는 버그가 있었음."""
-        tick = self.get_tick_size(inst_id)
-        decimals = len(tick.split(".")[1]) if "." in tick else 0
-        return f"{price:.{decimals}f}"
-
-    def _ts(self):
-        return datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
-
-    def _sign(self, ts, method, path, body=""):
-        msg = ts + method.upper() + path + body
-        return base64.b64encode(
-            hmac.new(self.sec.encode(), msg.encode(), hashlib.sha256).digest()
-        ).decode()
-
-    def _req(self, method, path, params=None, body=None):
-        query = ('?' + urllib.parse.urlencode(params)) if params else ''
-        full_path = path + query
-
-        ts = self._ts()
-        b = json.dumps(body) if body else ""
-
-        sig = self._sign(ts, method, full_path, b)
-
-        headers = {
-            "OK-ACCESS-KEY": self.key,
-            "OK-ACCESS-SIGN": sig,
-            "OK-ACCESS-TIMESTAMP": ts,
-            "OK-ACCESS-PASSPHRASE": self.pp,
-            "Content-Type": "application/json",
-            "User-Agent":           'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        }
-
-        url = self.BASE + full_path
-
-        try:
-            req = urllib.request.Request(
-                url,
-                data=b.encode() if b else None,
-                headers=headers,
-                method=method
-            )
-
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                return json.loads(resp.read().decode())
-
-        except urllib.error.HTTPError as e:
-
-            body = e.read().decode()
-
-            log.error("=" * 60)
-            log.error(f"HTTP {e.code}")
-            log.error(body)
-            log.error("=" * 60)
-
-            try:
-                return json.loads(body)
-            except:
-                return {
-                    "code": "-1",
-                    "msg": body
-                }
-
-        except Exception as e:
-            log.error(e)
-            return {
-                "code": "-1",
-                "msg": str(e)
-            }
-    def get_all_positions(self):
-        """모든 SWAP 포지션 조회"""
-        d = self._req("GET", "/api/v5/account/positions", {"instType": "SWAP"})
-        if d.get("code") != "0":
-            log.error(f"포지션 조회 실패: {d.get('msg')}")
-            return []
-        return [p for p in d.get("data", []) if float(p.get("pos", 0)) != 0]
-
-    def get_existing_tpsl(self, inst_id, pos_side):
-        """
-        해당 포지션에 이미 설정된 TP/SL 알고 주문 조회.
-        ordType 생략 시 OKX가 모든 타입을 한 번에 반환하므로 API 호출 1회로 처리.
-        posSide 필터는 완화(비어있거나 다르게 오는 경우 허용).
-        반환: {'has_sl': bool, 'has_tp': bool, 'sl_price': float|None, 'tp_price': float|None, 'algo_id': str|None}
-        """
-        has_sl = False; has_tp = False
-        sl_price = None; tp_price = None; algo_id = None
-
-        d = self._req("GET", "/api/v5/trade/orders-algo-pending", {
-            "instType": "SWAP",
-            "instId":   inst_id,
-        })
-        if d.get("code") == "0":
-            for o in d.get("data", []):
-                o_pos_side = o.get("posSide", "")
-                if o_pos_side and o_pos_side != pos_side:
-                    continue
-                sl = o.get("slTriggerPx", "")
-                tp = o.get("tpTriggerPx", "")
-                if sl and float(sl) > 0:
-                    has_sl = True
-                    sl_price = float(sl)
-                if tp and float(tp) > 0:
-                    has_tp = True
-                    tp_price = float(tp)
-                if sl or tp:
-                    algo_id = o.get("algoId")
-
-        return {"has_sl": has_sl, "has_tp": has_tp,
-                "sl_price": sl_price, "tp_price": tp_price, "algo_id": algo_id}
-
-    def get_all_algo_ids(self, inst_id):
-        """
-        해당 심볼의 모든 pending algo 주문 ID 목록 조회.
-        ordType 파라미터를 생략하면 OKX가 모든 타입을 한 번에 반환한다.
-        """
-        d = self._req("GET", "/api/v5/trade/orders-algo-pending", {
-            "instType": "SWAP",
-            "instId":   inst_id,
-        })
-        log.info(f"orders-algo-pending 응답: code={d.get('code')} 건수={len(d.get('data', []))}")
-        ids = []
-        if d.get("code") == "0":
-            for o in d.get("data", []):
-                aid = o.get("algoId")
-                if aid and aid not in ids:
-                    ids.append(aid)
-        return ids
-
-    def amend_tpsl(self, algo_id, inst_id, sl_price=None, tp_price=None):
-        """
-        기존 알고 주문 수정 (amend-algo-order).
-        SL 공백 없이 안전하게 수정 가능.
-        """
-        body = {"instId": inst_id, "algoId": algo_id}
-        if sl_price:
-            body["newSlTriggerPx"]     = self.fmt_px(inst_id, sl_price)
-            body["newSlOrdPx"]         = "-1"
-            body["newSlTriggerPxType"] = "mark"
-        if tp_price:
-            body["newTpTriggerPx"]     = self.fmt_px(inst_id, tp_price)
-            body["newTpOrdPx"]         = "-1"
-            body["newTpTriggerPxType"] = "mark"
-        log.info(f"AMEND 요청: algoId={algo_id} SL={sl_price} TP={tp_price}")
-        res = self._req("POST", "/api/v5/trade/amend-algos", body=body)
-        log.info(f"AMEND 응답: {json.dumps(res, ensure_ascii=False)}")
-        return res
-
-    def cancel_algo(self, inst_id, algo_id):
-        """알고 주문 취소"""
-        body = [{"instId": inst_id, "algoId": algo_id}]
-        log.info(f"기존 알고주문 취소: algoId={algo_id}")
-        return self._req("POST", "/api/v5/trade/cancel-algos", body=body)
-
-    def set_tpsl(self, inst_id, pos_side, sl_price=None, tp_price=None, algo_id=None):
-        """
-        TP/SL 설정.
-        - algo_id 있으면 → amend-algos (안전, SL 공백 없음)
-        - amend 실패 시 → 기존 주문 취소 후 신규 생성
-          (OKX는 포지션당 TP/SL 알고 주문 1개만 허용하므로 취소 없이 신규 생성 불가)
-        """
-        # 기존 주문 수정 (권장)
-        if algo_id:
-            res = self.amend_tpsl(algo_id, inst_id, sl_price=sl_price, tp_price=tp_price)
-            if res.get("code") == "0":
-                return res
-            log.warning(f"amend 실패 ({res.get('msg')}) → 기존 주문 취소 후 재생성")
-            # amend 실패 시 기존 주문 취소 (포지션당 1개 제한 때문에 필수)
-            cancel_res = self.cancel_algo(inst_id, algo_id)
-            if cancel_res.get("code") != "0":
-                log.warning(f"기존 주문 취소 실패: {cancel_res.get('msg')} — 그래도 신규 생성 시도")
-
-        # 신규 주문 생성
-        pos = self.get_all_positions()
-        td_mode = "cross"
-        for p in pos:
-            if p["instId"] == inst_id and p["posSide"] == pos_side:
-                td_mode = p.get("mgnMode", "cross")
-                break
-
-        body = {
-            "instId":        inst_id,
-            "tdMode":        td_mode,
-            "side":          "sell" if pos_side == "long" else "buy",
-            "posSide":       pos_side,
-            "ordType":       "conditional",
-            "closeFraction": "1",
-        }
-        if sl_price:
-            body["slTriggerPx"]     = self.fmt_px(inst_id, sl_price)
-            body["slOrdPx"]         = "-1"
-            body["slTriggerPxType"] = "mark"
-        if tp_price:
-            body["tpTriggerPx"]     = self.fmt_px(inst_id, tp_price)
-            body["tpOrdPx"]         = "-1"
-            body["tpTriggerPxType"] = "mark"
-
-        log.info(f"신규 TP/SL 요청: {json.dumps(body, ensure_ascii=False)}")
-        res = self._req("POST", "/api/v5/trade/order-algo", body=body)
-
-        # 그래도 "1개만 허용" 에러가 나면, posSide 매칭 없이 해당 심볼의 모든 알고 주문을 취소 후 재시도
-        if res.get("code") != "0":
-            try:
-                sub_err = res.get("data", [{}])[0].get("sCode")
-            except (IndexError, AttributeError, TypeError):
-                sub_err = None
-            if sub_err == "51088":
-                log.warning("포지션당 TP/SL 1개 제한 — 심볼 전체 알고주문 조회 후 취소 재시도")
-                all_ids = self.get_all_algo_ids(inst_id)
-                if all_ids:
-                    log.warning(f"발견된 알고주문 {len(all_ids)}개 전부 취소: {all_ids}")
-                    for aid in all_ids:
-                        self.cancel_algo(inst_id, aid)
-                    time.sleep(0.3)  # 취소 반영 대기
-                    res = self._req("POST", "/api/v5/trade/order-algo", body=body)
-                    if res.get("code") != "0":
-                        log.warning(f"재시도 후에도 실패: {res.get('msg')} | {json.dumps(res, ensure_ascii=False)}")
-                else:
-                    log.warning("취소할 알고주문을 찾지 못함 — OKX 응답 지연 가능성")
-
-        return res
-
-    def get_klines(self, inst_id, bar, limit):
-        """
-        캔들 조회. OKX bar 값: 1m 3m 5m 15m 30m 1H 4H 1D
-        반환: [[ts, open, high, low, close, vol, volCcy, volCcyQuote, confirm], ...]
-        최신 캔들이 index 0 (내림차순) → 반전해서 사용
-        """
-        d = self._req("GET", "/api/v5/market/candles", {
-            "instId": inst_id, "bar": bar, "limit": str(limit)
-        })
-        if d.get("code") != "0":
-            log.error(f"캔들 조회 실패 {inst_id}: {d.get('msg')}")
-            return []
-        return list(reversed(d.get("data", [])))  # 오래된 것 → 최신 순으로 정렬
-
-    def close_position_market(self, inst_id, pos_side):
-
-        td_mode = "cross"
-
-        for p in self.get_all_positions():
-            if p["instId"] == inst_id and p["posSide"] == pos_side:
-                td_mode = p.get("mgnMode", "cross")
-                break
-
-        body = {
-            "instId": inst_id,
-            "posSide": pos_side,
-            "mgnMode": td_mode
-        }
-
-        return self._req(
-            "POST",
-            "/api/v5/trade/close-position",
-            body=body
-        )
-
 # ─── 지표 & 차트 구조 분석 ──────────────────────────────
-def calc_atr(highs, lows, closes, period=14):
-    if len(closes) < period + 1:
-        return None
-    trs = []
-    for i in range(1, len(closes)):
-        tr = max(
-            highs[i] - lows[i],
-            abs(highs[i] - closes[i-1]),
-            abs(lows[i]  - closes[i-1]),
-        )
-        trs.append(tr)
-    if len(trs) < period:
-        return None
-    atr = sum(trs[:period]) / period
-    for i in range(period, len(trs)):
-        atr = (atr * (period - 1) + trs[i]) / period
-    return atr
-
-
 def calc_vwap(highs, lows, closes, volumes, lookback=48):
     """
     VWAP(거래량 가중 평균가) 계산. 최근 lookback봉 기준.
@@ -761,17 +466,7 @@ _pos_config_db_cache = {"data": {}, "ts": 0}
 _POS_CONFIG_CACHE_SEC = 5  # 5초 캐싱 (DB 부하 방지, 그래도 충분히 빠른 반영)
 
 def _get_db_connection():
-    if not _HAS_PSYCOPG2:
-        return None
-    url = os.environ.get("DATABASE_URL", "")
-    if not url:
-        return None
-    url = url.split("?")[0]  # pgbouncer 파라미터 제거
-    try:
-        return psycopg2.connect(url, sslmode="require", connect_timeout=5)
-    except Exception as e:
-        log.warning(f"[DB] 연결 실패: {e}")
-        return None
+    return bot_db.get_db_connection()
 
 def get_pos_enabled_from_db(pos_key):
     """
@@ -1217,6 +912,34 @@ class PositionGuardian:
                 else:
                     log.warning("     [DRY-RUN] 긴급 청산 생략")
                 continue
+
+            # ── 봇 진입 포지션의 정책 인수 (v3) ──
+            # bot_signals에서 이 포지션의 진입 전략을 조회:
+            #   횡보(stochrsi_ema50) → 진입 시 고정 SL/TP 유지, Guardian은 감시만
+            #   추세(donchian_breakout) → Guardian의 구조 인식 트레일링이 관리 (아래 정상 경로)
+            #   조회 안 됨 → 수동 포지션으로 간주, Guardian 기본 관리
+            policy = bot_db.get_bot_policy(inst_id, side)
+            if policy and policy.get("strategy") == "stochrsi_ema50":
+                bot_db.tag_exit_engine(policy["signal_id"], "entry_fixed")
+                log.info(f"  🤖 {symbol} {side.upper()}: 봇 횡보 진입 — 진입 SL/TP 고정 유지 (Guardian 감시만)")
+                try:
+                    mark = float(pos.get("markPx", 0) or 0)
+                    entry = float(pos.get("avgPx", 0) or 0)
+                except Exception:
+                    mark = entry = 0
+                snapshot.append({
+                    "symbol": symbol, "inst_id": inst_id, "side": side,
+                    "entry": entry, "mark": mark,
+                    "pnl_pct": round(((mark-entry)/entry*100) if entry else 0, 2),
+                    "sl": None, "sl_dist_pct": 0,
+                    "trailing_active": False,
+                    "sl_source": "봇 진입 고정 (range)",
+                    "tp_price": None, "tp_source": "봇 진입 고정 (range)",
+                })
+                continue
+            if policy and policy.get("strategy") == "donchian_breakout":
+                bot_db.tag_exit_engine(policy["signal_id"], "guardian")
+                log.info(f"  🤖 {symbol} {side.upper()}: 봇 추세 진입 — Guardian 구조 트레일링 인수")
 
             # ── 포지션별 ON/OFF 체크 (DB 직접 조회 — 프로세스 간 일관성 보장) ──
             pos_enabled = get_pos_enabled_from_db(pos_key)

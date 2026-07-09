@@ -28,6 +28,12 @@ try:
 except ImportError:
     _HAS_PSYCOPG2 = False
 
+# 공용 모듈 (okx_client.py / indicators.py / bot_db.py)
+from okx_client import OKXClient
+from indicators import (calc_ema, calc_rsi, calc_stoch_rsi, calc_bollinger,
+                        calc_donchian, calc_bbw, calc_atr)
+import bot_db
+
 try:
     sys.stdout.reconfigure(line_buffering=True)
 except Exception:
@@ -94,8 +100,6 @@ DEFAULT_CONFIG = {
     "atr_period":       14,
     "trend_sl_atr":     2.0,
     "trend_tp_atr":     4.0,
-    "trailing_stop":    True,
-    "trail_atr":        1.0,
     "range_sl_atr":     1.0,
     "range_tp_atr":     2.0,
     # SL 하한/상한 (가격 대비 %) — ATR 극단값에서 수수료/노이즈 손절 방지
@@ -120,243 +124,13 @@ def load_state():
         state = {}
     # v2 구조 보정 (구버전 state 파일과의 호환)
     state.setdefault("trades", [])
-    state.setdefault("symbols", {})   # 심볼별: last_signal, trail_high, trail_low, latest
+    state.setdefault("symbols", {})   # 심볼별: last_signal, latest
     state.setdefault("latest", {})
     return state
 
 def save_state(state):
     with open(STATE_PATH, "w", encoding="utf-8") as f:
         json.dump(state, f, indent=2, ensure_ascii=False, default=str)
-
-
-# ─── OKX REST 클라이언트 (urllib 기반) ───────────────────
-class OKXClient:
-    def __init__(self, cfg):
-        self.key  = cfg["api_key"]
-        self.sec  = cfg["api_secret"]
-        self.pp   = cfg["passphrase"]
-        self.base = cfg["base_url"]
-
-    def _timestamp(self):
-        return datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
-
-    def _sign(self, timestamp, method, path_with_qs, body=""):
-        msg = timestamp + method.upper() + path_with_qs + body
-        return base64.b64encode(
-            hmac.new(self.sec.encode(), msg.encode(), hashlib.sha256).digest()
-        ).decode()
-
-    def _req(self, method, path, params=None, body=None):
-        ts = self._timestamp()
-        bs = json.dumps(body) if body else ""
-
-        query = ("?" + urllib.parse.urlencode(params)) if (method.upper() == "GET" and params) else ""
-        path_for_sign = path + query
-        sig = self._sign(ts, method, path_for_sign, bs)
-
-        headers = {
-            "OK-ACCESS-KEY":        self.key,
-            "OK-ACCESS-SIGN":       sig,
-            "OK-ACCESS-TIMESTAMP":  ts,
-            "OK-ACCESS-PASSPHRASE": self.pp,
-            "Content-Type":         "application/json",
-            "x-simulated-trading":  "0",
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        }
-
-        url = self.base + path + query
-        try:
-            data = bs.encode() if bs else None
-            req  = urllib.request.Request(url, data=data, headers=headers, method=method.upper())
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                d = json.loads(resp.read().decode())
-            if d.get("code") != "0":
-                log.error(f"API 오류 {path}: code={d.get('code')} msg={d.get('msg')}")
-            return d
-        except urllib.error.HTTPError as e:
-            body_txt = e.read().decode()
-            log.error(f"HTTPError {path}: {e.code} {body_txt[:200]}")
-            return {"code": str(e.code), "msg": body_txt[:200], "data": []}
-        except Exception as e:
-            log.error(f"요청 실패 {path}: {e}")
-            return {"code": "-1", "msg": str(e), "data": []}
-
-    # ── 시장 데이터 ──────────────────────────────────────
-    def get_klines(self, inst_id, bar="15m", limit=100):
-        d = self._req("GET", "/api/v5/market/candles",
-                      {"instId": inst_id, "bar": bar, "limit": str(limit)})
-        data = d.get("data", [])
-        return list(reversed(data))
-
-    def get_ticker(self, inst_id):
-        d = self._req("GET", "/api/v5/market/ticker", {"instId": inst_id})
-        data = d.get("data", [])
-        return data[0] if data else {}
-
-    def get_instrument(self, inst_id):
-        """계약 스펙 조회 (ctVal: 1계약당 기초자산 수량, lotSz, minSz 등)"""
-        d = self._req("GET", "/api/v5/public/instruments",
-                      {"instType": "SWAP", "instId": inst_id})
-        data = d.get("data", [])
-        return data[0] if data else {}
-
-    # ── 계좌 ────────────────────────────────────────────
-    def get_balance(self, ccy="USDT"):
-        d = self._req("GET", "/api/v5/account/balance", {"ccy": ccy})
-        try:
-            details = d["data"][0]["details"]
-            for item in details:
-                if item["ccy"] == ccy:
-                    return float(item["availBal"])
-        except Exception:
-            pass
-        return 0.0
-
-    def get_balance_detail(self, ccy="USDT"):
-        """(cashBal, availBal) 반환.
-        cashBal = 미실현손익 제외 실제 현금 잔고 — 복리 사이징의 기준.
-        (실현된 수익만 시드에 반영; 평가이익으로 진입 금액이 부풀지 않음)"""
-        d = self._req("GET", "/api/v5/account/balance", {"ccy": ccy})
-        try:
-            for item in d["data"][0]["details"]:
-                if item["ccy"] == ccy:
-                    cash  = float(item.get("cashBal", 0) or 0)
-                    avail = float(item.get("availBal", 0) or 0)
-                    return cash, avail
-        except Exception:
-            pass
-        return 0.0, 0.0
-
-    def get_positions(self, inst_id=None):
-        params = {"instType": "SWAP"}
-        if inst_id:
-            params["instId"] = inst_id
-        d = self._req("GET", "/api/v5/account/positions", params)
-        data = d.get("data", [])
-        return [p for p in data if float(p.get("pos", 0) or 0) != 0]
-
-    def set_leverage(self, inst_id, lever, mgn_mode="isolated", pos_side="net"):
-        return self._req("POST", "/api/v5/account/set-leverage",
-                         body={"instId": inst_id, "lever": str(lever),
-                               "mgnMode": mgn_mode, "posSide": pos_side})
-
-    # ── 주문 ────────────────────────────────────────────
-    def place_order(self, inst_id, td_mode, side, pos_side, sz,
-                    tp_price=None, sl_price=None):
-        body = {
-            "instId":  inst_id,
-            "tdMode":  td_mode,
-            "side":    side,
-            "posSide": pos_side,
-            "ordType": "market",
-            "sz":      str(sz),
-        }
-        if tp_price or sl_price:
-            algo = {}
-            if tp_price:
-                algo["tpTriggerPx"] = str(tp_price)
-                algo["tpOrdPx"]     = "-1"
-            if sl_price:
-                algo["slTriggerPx"] = str(sl_price)
-                algo["slOrdPx"]     = "-1"
-            body["attachAlgoOrds"] = [algo]
-        return self._req("POST", "/api/v5/trade/order", body=body)
-
-    def amend_algo_order(self, inst_id, algo_id, new_sl=None, new_tp=None):
-        body = {"instId": inst_id, "algoId": algo_id}
-        if new_sl: body["newSlTriggerPx"] = str(new_sl); body["newSlOrdPx"] = "-1"
-        if new_tp: body["newTpTriggerPx"] = str(new_tp); body["newTpOrdPx"] = "-1"
-        return self._req("POST", "/api/v5/trade/amend-algos", body=body)
-
-    def place_sl_order(self, inst_id, td_mode, side, pos_side, sl_price):
-        body = {
-            "instId":      inst_id,
-            "tdMode":      td_mode,
-            "side":        side,
-            "posSide":     pos_side,
-            "ordType":     "conditional",
-            "closeFraction": "1",
-            "slTriggerPx": str(sl_price),
-            "slOrdPx":     "-1",
-        }
-        return self._req("POST", "/api/v5/trade/order-algo", body=body)
-
-    def cancel_algo_orders(self, inst_id, algo_ids):
-        body = [{"instId": inst_id, "algoId": aid} for aid in algo_ids]
-        return self._req("POST", "/api/v5/trade/cancel-algos", body=body)
-
-    def get_algo_orders(self, inst_id):
-        d = self._req("GET", "/api/v5/trade/orders-algo-pending",
-                      {"instId": inst_id, "ordType": "conditional"})
-        return d.get("data", [])
-
-
-# ─── 지표 계산 ──────────────────────────────────────────
-def calc_ema(data, period):
-    result = [None] * len(data)
-    k = 2 / (period + 1)
-    for i in range(len(data)):
-        if i < period - 1: continue
-        result[i] = sum(data[:period]) / period if i == period - 1 else data[i] * k + result[i-1] * (1 - k)
-    return result
-
-def calc_rsi(data, period=14):
-    result = [None] * len(data)
-    for i in range(period, len(data)):
-        gains  = [max(data[j]-data[j-1], 0) for j in range(i-period+1, i+1)]
-        losses = [max(data[j-1]-data[j], 0) for j in range(i-period+1, i+1)]
-        ag, al = sum(gains)/period, sum(losses)/period
-        result[i] = 100 - (100/(1+ag/al)) if al else 100
-    return result
-
-def calc_stoch_rsi(data, rsi_p=14, stoch_p=14):
-    rsi = calc_rsi(data, rsi_p)
-    result = [None] * len(rsi)
-    for i in range(stoch_p, len(rsi)):
-        window = [rsi[j] for j in range(i-stoch_p+1, i+1) if rsi[j] is not None]
-        if len(window) < stoch_p: continue
-        mn, mx = min(window), max(window)
-        result[i] = (rsi[i] - mn) / (mx - mn) * 100 if mx != mn else 50
-    return result
-
-def calc_bollinger(data, period=20, std_mult=2.0):
-    upper, mid, lower = [], [], []
-    for i in range(len(data)):
-        if i < period - 1:
-            upper.append(None); mid.append(None); lower.append(None); continue
-        sl = data[i-period+1:i+1]
-        m  = sum(sl) / period
-        s  = math.sqrt(sum((x-m)**2 for x in sl) / period)
-        mid.append(m); upper.append(m + std_mult*s); lower.append(m - std_mult*s)
-    return upper, mid, lower
-
-def calc_donchian(highs, lows, period=20):
-    dc_high = [None] * len(highs)
-    dc_low  = [None] * len(lows)
-    for i in range(period-1, len(highs)):
-        dc_high[i] = max(highs[i-period+1:i+1])
-        dc_low[i]  = min(lows[i-period+1:i+1])
-    return dc_high, dc_low
-
-def calc_bbw(upper, mid, lower):
-    if upper and mid and lower and mid != 0:
-        return (upper - lower) / mid
-    return None
-
-def calc_atr(highs, lows, closes, period=14):
-    """ATR (Wilder smoothing). position_guardian.py와 동일 로직."""
-    if len(closes) < period + 1:
-        return None
-    trs = []
-    for i in range(1, len(closes)):
-        tr = max(highs[i] - lows[i],
-                 abs(highs[i] - closes[i-1]),
-                 abs(lows[i]  - closes[i-1]))
-        trs.append(tr)
-    atr = sum(trs[:period]) / period
-    for i in range(period, len(trs)):
-        atr = (atr * (period - 1) + trs[i]) / period
-    return atr
 
 
 # ─── OKX 심볼 유틸 ──────────────────────────────────────
@@ -376,17 +150,7 @@ _bot_config_cache = {"data": {"running": False, "usdt_amount": 50.0, "leverage":
 _BOT_CONFIG_CACHE_SEC = 5
 
 def _get_db_connection():
-    if not _HAS_PSYCOPG2:
-        return None
-    url = os.environ.get("DATABASE_URL", "")
-    if not url:
-        return None
-    url = url.split("?")[0]
-    try:
-        return psycopg2.connect(url, sslmode="require", connect_timeout=5)
-    except Exception as e:
-        log.warning(f"[DB] 연결 실패: {e}")
-        return None
+    return bot_db.get_db_connection()
 
 def get_entry_bot_config():
     """
@@ -527,35 +291,6 @@ def save_last_signal_to_db(symbol, signal):
         except Exception: pass
 
 
-def disable_guardian_for_position(symbol, pos_side):
-    """
-    봇이 진입한 포지션은 Guardian의 동적 SL/TP 관리를 끈다.
-    → 진입 당시 설정(ATR SL/TP + 봇 자체 트레일링)만 적용됨.
-    Guardian의 긴급청산(마진 80% 손실)은 플래그와 무관하게 항상 동작하므로 안전망은 유지.
-    포지션 청산 시 Guardian의 stale 정리 로직이 이 플래그를 삭제해,
-    이후 같은 심볼·방향 '수동' 진입은 다시 Guardian 관리를 받는다.
-    대시보드에서 수동으로 다시 켜는 것도 가능 (플래그를 true로 토글).
-    """
-    conn = _get_db_connection()
-    if conn is None:
-        log.warning(f"[{symbol}] guardian 플래그 기록 실패 (DB 연결 없음) — Guardian이 관리하게 됨")
-        return
-    try:
-        pos_key = f"{symbol}-{pos_side}"
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute("""
-                    INSERT INTO settings (key, value) VALUES (%s, 'false')
-                    ON CONFLICT (key) DO UPDATE SET value = 'false'
-                """, (f"guardian_pos:{pos_key}",))
-        log.info(f"  🛡️ [{pos_key}] Guardian OFF — 진입 시 설정(SL/TP/트레일링)만 적용")
-    except Exception as e:
-        log.warning(f"[DB] guardian 플래그 기록 실패: {e}")
-    finally:
-        try: conn.close()
-        except Exception: pass
-
-
 # ─── 메인 봇 ────────────────────────────────────────────
 class EntryBot:
     def __init__(self, cfg):
@@ -564,42 +299,21 @@ class EntryBot:
         self.state  = load_state()
         self.dry    = cfg.get("dry_run", True)
         self._last_leverage = {}   # 심볼별 마지막 적용 레버리지
-        self._inst_cache    = {}   # 심볼별 계약 스펙 (ctVal, lotSz, minSz)
 
     # ── 심볼별 상태 접근 헬퍼 ──
     def _sym_state(self, sym):
         return self.state["symbols"].setdefault(sym, {
-            "last_signal": None, "trail_high": None, "trail_low": None,
+            "last_signal": None,
         })
 
     def _get_instrument_spec(self, sym):
-        """계약 스펙 캐시 조회. ctVal(1계약당 기초자산)이 심볼마다 다름:
-        BTC 0.01 / ETH 0.1 / SOL 1 / XRP 100 / DOGE 1000 등"""
-        if sym in self._inst_cache:
-            return self._inst_cache[sym]
-        inst = self.client.get_instrument(sym)
-        if not inst:
-            log.warning(f"[{sym}] 계약 스펙 조회 실패 — ctVal 기본값 사용 불가, 진입 차단됨")
-            return None
-        spec = {
-            "ctVal": float(inst.get("ctVal", 0) or 0),
-            "lotSz": float(inst.get("lotSz", 1) or 1),
-            "minSz": float(inst.get("minSz", 1) or 1),
-            "tickSz": inst.get("tickSz", "0.1"),
-        }
-        if spec["ctVal"] <= 0:
-            log.warning(f"[{sym}] ctVal 값 이상: {inst.get('ctVal')}")
-            return None
-        self._inst_cache[sym] = spec
-        log.info(f"[{sym}] 계약 스펙: ctVal={spec['ctVal']} lotSz={spec['lotSz']} minSz={spec['minSz']}")
+        spec = self.client.get_instrument_spec(sym)
+        if spec is None:
+            log.warning(f"[{sym}] 계약 스펙 조회 실패 — 진입 차단됨")
         return spec
 
     def _round_px(self, sym, price):
-        """tickSz 소수 자릿수에 맞춰 가격 반올림"""
-        spec = self._inst_cache.get(sym)
-        tick = spec["tickSz"] if spec else "0.1"
-        decimals = len(tick.split(".")[1]) if "." in tick else 0
-        return f"{price:.{decimals}f}"
+        return self.client.fmt_px(sym, price)
 
     def _apply_leverage_if_changed(self, sym, leverage):
         """DB에서 읽은 레버리지가 이전과 다르면 OKX에 재설정 (심볼별)"""
@@ -745,50 +459,6 @@ class EntryBot:
         return (self._round_px(sym, tp), self._round_px(sym, sl),
                 round(sl_dist / price * 100, 3), round(tp_dist / price * 100, 3))
 
-    def _update_trailing_stop(self, sym, price, atr, positions):
-        """추세장 트레일링 스탑 (v2: 고정 % → ATR×trail_atr 거리, 심볼별 상태)"""
-        if not self.cfg.get("trailing_stop"): return
-        if atr is None: return
-        ss = self._sym_state(sym)
-        trail_dist = atr * self.cfg["trail_atr"]
-        # 트레일 거리도 최소 하한 적용
-        trail_dist = max(trail_dist, price * self.cfg["sl_min_pct"] / 100)
-
-        for pos in positions:
-            pos_side = pos.get("posSide", "")
-            qty = float(pos.get("pos", 0))
-            if qty == 0: continue
-
-            if pos_side == "long":
-                prev_high = ss.get("trail_high") or price
-                if price > prev_high:
-                    ss["trail_high"] = price
-                    new_sl = price - trail_dist
-                    log.info(f"  📈 [{sym}] 트레일링 SL 업 → {new_sl:.6f} (ATR 기반)")
-                    if not self.dry:
-                        algos = self.client.get_algo_orders(sym)
-                        sl_algo_ids = [a["algoId"] for a in algos if a.get("slTriggerPx")]
-                        if sl_algo_ids:
-                            self.client.cancel_algo_orders(sym, sl_algo_ids)
-                        self.client.place_sl_order(
-                            sym, self.cfg["td_mode"],
-                            "sell", "long", self._round_px(sym, new_sl))
-
-            elif pos_side == "short":
-                prev_low = ss.get("trail_low") or price
-                if price < prev_low:
-                    ss["trail_low"] = price
-                    new_sl = price + trail_dist
-                    log.info(f"  📉 [{sym}] 트레일링 SL 다운 → {new_sl:.6f} (ATR 기반)")
-                    if not self.dry:
-                        algos = self.client.get_algo_orders(sym)
-                        sl_algo_ids = [a["algoId"] for a in algos if a.get("slTriggerPx")]
-                        if sl_algo_ids:
-                            self.client.cancel_algo_orders(sym, sl_algo_ids)
-                        self.client.place_sl_order(
-                            sym, self.cfg["td_mode"],
-                            "buy", "short", self._round_px(sym, new_sl))
-
     def _process_symbol(self, sym, bot_cfg, total_open_count):
         """
         단일 심볼 처리: 캔들 조회 → 레짐 판정 → 신호 → 진입/트레일링.
@@ -836,9 +506,6 @@ class EntryBot:
         except Exception as e:
             log.warning(f"[{sym}] 포지션 조회 실패: {e}")
 
-        if open_pos and phase == "trend" and not self.dry:
-            self._update_trailing_stop(sym, price, atr, open_pos)
-
         if open_pos:
             for p in open_pos:
                 ps    = p.get("posSide", "?")
@@ -880,7 +547,7 @@ class EntryBot:
                 tp_price, sl_price, sl_pct, tp_pct = self._tp_sl_atr(sym, signal, price, atr, is_trend)
                 side_okx, pos_side_okx = signal_to_okx(signal)
                 dir_icon   = "🟢 롱" if signal == "long" else "🔴 숏"
-                trail_note = " (트레일링 스탑 활성)" if is_trend and self.cfg["trailing_stop"] else ""
+                trail_note = " (청산관리: Guardian)" if is_trend else " (진입 SL/TP 고정)"
                 if bot_cfg.get("entry_pct", 0) > 0:
                     size_desc = f"시드의 {bot_cfg['entry_pct']}% (복리)"
                 else:
@@ -912,7 +579,7 @@ class EntryBot:
                     "leverage": bot_cfg["leverage"],
                     "usdt_amount": bot_cfg["usdt_amount"],
                     "interval": self.cfg["kline_interval"],
-                    "trailing": bool(is_trend and self.cfg["trailing_stop"]),
+                    "exit_policy": "guardian_trailing" if is_trend else "fixed",
                     "dry_run": self.dry,
                     "entry_ts": int(time.time()),
                 }
@@ -955,12 +622,9 @@ class EntryBot:
                             except Exception:
                                 pass
                             signal_result = "order_failed"
-                        if is_trend and res.get("code") == "0":
-                            ss["trail_high"] = price if signal == "long"  else None
-                            ss["trail_low"]  = price if signal == "short" else None
-                        if res.get("code") == "0":
-                            # 봇 진입 포지션은 Guardian 동적 관리 제외 (진입 설정만 적용)
-                            disable_guardian_for_position(sym, pos_side_okx)
+                        # v3: 봇 자체 트레일링 제거 — 청산 관리는 Guardian이 전담.
+                        # 추세 진입은 Guardian의 구조 인식 트레일링이 관리하고,
+                        # 횡보 진입은 Guardian이 정책을 읽어 진입 SL/TP를 그대로 유지한다.
                 else:
                     log.info("  [DRY-RUN] 실주문 생략")
 
@@ -1054,6 +718,7 @@ class EntryBot:
                  f"추세 SL×{self.cfg['trend_sl_atr']}/TP×{self.cfg['trend_tp_atr']}, "
                  f"횡보 SL×{self.cfg['range_sl_atr']}/TP×{self.cfg['range_tp_atr']}, "
                  f"하한 {self.cfg['sl_min_pct']}%")
+        log.info(" 청산관리  : Guardian 전담 (추세=구조 트레일링 / 횡보=진입 고정)")
         log.info(f" DRY-RUN  : {self.cfg['dry_run']}")
         log.info("=" * 55)
         while True:
