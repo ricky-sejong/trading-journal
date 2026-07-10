@@ -30,6 +30,7 @@ except ImportError:
 
 # 공용 모듈 (okx_client.py / indicators.py / bot_db.py)
 from okx_client import OKXClient
+import notify
 from indicators import (calc_ema, calc_rsi, calc_stoch_rsi, calc_bollinger,
                         calc_donchian, calc_bbw, calc_atr)
 import bot_db
@@ -85,6 +86,21 @@ DEFAULT_CONFIG = {
 
     # ── 추세장 전략: 돈치안 브레이크아웃 ──
     "donchian_period":  20,
+
+    # ── 횡보 전략 마감 캔들 확정 진입 ──
+    # True면 StochRSI 크로스를 '마감된 캔들'로만 판정 (캔들 내 깜빡임 가짜신호 제거).
+    # 백테스트가 마감 캔들 기준이므로 라이브를 백테스트 조건에 정렬하는 것.
+    "range_confirm_close": os.environ.get("ENTRY_BOT_RANGE_CONFIRM", "true").lower() != "false",
+
+    # ── 연쇄청산 페이드 감지기 (측정 전용 — 실주문 없음) ──
+    # 1분봉에서 거래량·레인지 폭발 감지 → 역방향 가상 신호만 기록.
+    # VIRT WR로 기대값 검증 후에만 실매매 승격 여부 결정.
+    "cascade_detect":     True,
+    "cascade_vol_mult":   4.0,    # 거래량 > 직전 30봉 평균 × N
+    "cascade_range_mult": 3.0,    # 캔들 레인지 > 1분 ATR × N
+    "cascade_tp_pct":     0.5,    # 목표 +0.5%
+    "cascade_sl_buffer":  0.10,   # SL = 꼬리 극단 밖 0.10%
+    "cascade_cooldown":   900,    # 심볼당 재감지 쿨다운(초)
 
     # ── 횡보장 전략: StochRSI + EMA50 ──
     "rsi_period":       14,
@@ -340,7 +356,9 @@ class EntryBot:
         highs   = [float(c[2]) for c in raw]
         lows    = [float(c[3]) for c in raw]
         volumes = [float(c[5]) for c in raw]
-        return closes, highs, lows, volumes
+        # confirm: '0'=진행 중 캔들, '1'=마감 (필드 없으면 마감 취급)
+        last_confirmed = not (len(raw[-1]) > 8 and raw[-1][8] == "0")
+        return closes, highs, lows, volumes, last_confirmed
 
     def _detect_market_phase(self, closes):
         bb_u, bb_m, bb_l = calc_bollinger(closes, self.cfg["bb_period"], self.cfg["bb_std"])
@@ -459,6 +477,81 @@ class EntryBot:
         return (self._round_px(sym, tp), self._round_px(sym, sl),
                 round(sl_dist / price * 100, 3), round(tp_dist / price * 100, 3))
 
+    def _detect_cascade(self, sym):
+        """
+        연쇄청산 페이드 후보 감지 (측정 전용 — 절대 실주문하지 않음).
+        1분봉에서 [거래량 > 30봉 평균×N] AND [레인지 > 1분 ATR×N]인 마감 캔들 발견 시
+        캔들 방향의 '역방향' 가상 신호를 bot_signals에 기록.
+        판정은 서버 가상 판정이 1분봉으로 수행 (meta.eval_bar='1m').
+        VIRT WR로 기대값이 검증되기 전까지는 데이터 수집 역할만 한다.
+        """
+        if not self.cfg.get("cascade_detect"):
+            return
+        ss = self._sym_state(sym)
+        now = time.time()
+        if now - ss.get("last_cascade_ts", 0) < self.cfg["cascade_cooldown"]:
+            return
+        raw = self.client.get_klines(sym, "1m", 60)
+        if len(raw) < 40:
+            return
+        closed = [c for c in raw if not (len(c) > 8 and c[8] == "0")]
+        if len(closed) < 35:
+            return
+        last = closed[-1]
+        try:
+            o, h, l, c = float(last[1]), float(last[2]), float(last[3]), float(last[4])
+            vol = float(last[5])
+            prev = closed[-31:-1]
+            vol_mean = sum(float(x[5]) for x in prev) / len(prev)
+            highs  = [float(x[2]) for x in closed[-16:]]
+            lows   = [float(x[3]) for x in closed[-16:]]
+            closes = [float(x[4]) for x in closed[-16:]]
+            atr1m  = calc_atr(highs, lows, closes, 14)
+        except (ValueError, TypeError, IndexError):
+            return
+        if not atr1m or vol_mean <= 0:
+            return
+        rng = h - l
+        if vol < vol_mean * self.cfg["cascade_vol_mult"] or rng < atr1m * self.cfg["cascade_range_mult"]:
+            return
+
+        # 급락 캔들 → 롱 페이드 / 급등 캔들 → 숏 페이드
+        signal = "long" if c < o else "short"
+        buf = c * self.cfg["cascade_sl_buffer"] / 100
+        if signal == "long":
+            tp = c * (1 + self.cfg["cascade_tp_pct"] / 100)
+            sl = l - buf          # 꼬리 저점 밖
+        else:
+            tp = c * (1 - self.cfg["cascade_tp_pct"] / 100)
+            sl = h + buf          # 꼬리 고점 밖
+        sl_pct = abs(c - sl) / c * 100
+        vol_ratio = round(vol / vol_mean, 2)
+
+        ss["last_cascade_ts"] = now
+        log.info(f"  ⚡ [{sym}] 연쇄청산 후보 감지! {signal.upper()} 페이드 "
+                 f"(거래량 {vol_ratio}x, 레인지 {rng/atr1m:.1f}×ATR) — 가상 기록만, 실주문 없음")
+
+        meta = {
+            "symbol": sym,
+            "strategy": "cascade_fade",
+            "regime": "event",
+            "signal": signal,
+            "price": c,
+            "tp_price": self._round_px(sym, tp),
+            "sl_price": self._round_px(sym, sl),
+            "tp_pct": self.cfg["cascade_tp_pct"],
+            "sl_pct": round(sl_pct, 3),
+            "volume_ratio": vol_ratio,
+            "range_atr_mult": round(rng / atr1m, 2),
+            "candle_dir": "down" if c < o else "up",
+            "hour_kst": datetime.datetime.now().hour,
+            "eval_bar": "1m",          # 가상 판정을 1분봉으로
+            "dry_run": True,           # 측정 전용 — 항상 dry
+            "measurement_only": True,
+            "entry_ts": int(time.time()),
+        }
+        record_signal(sym, None, meta)
+
     def _process_symbol(self, sym, bot_cfg, total_open_count):
         """
         단일 심볼 처리: 캔들 조회 → 레짐 판정 → 신호 → 진입/트레일링.
@@ -470,11 +563,17 @@ class EntryBot:
         if not candles:
             log.warning(f"[{sym}] 캔들 없음")
             return []
-        closes, highs, lows, volumes = candles
+        closes, highs, lows, volumes, last_confirmed = candles
 
         ticker = self.client.get_ticker(sym)
         price  = float(ticker.get("last", closes[-1]))
         ts     = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        # 연쇄청산 페이드 후보 감지 (측정 전용, 예외가 본 흐름을 막지 않게)
+        try:
+            self._detect_cascade(sym)
+        except Exception as e:
+            log.warning(f"[{sym}] cascade 감지 오류: {e}")
 
         phase, bbw = self._detect_market_phase(closes)
         indicators = self._get_indicators_snapshot(closes, highs, lows)
@@ -486,7 +585,11 @@ class EntryBot:
             signal = self._trend_signal(closes, highs, lows)
             strategy_used = "돈치안 브레이크아웃"
         elif phase == "range":
-            signal = self._range_signal(closes)
+            if self.cfg.get("range_confirm_close") and not last_confirmed:
+                # 마지막 캔들이 아직 진행 중 → 마감된 구간만으로 판정
+                signal = self._range_signal(closes[:-1])
+            else:
+                signal = self._range_signal(closes)
             strategy_used = "StochRSI+EMA50"
         else:
             strategy_used = "중립 (대기)"
@@ -579,6 +682,8 @@ class EntryBot:
                     "leverage": bot_cfg["leverage"],
                     "usdt_amount": bot_cfg["usdt_amount"],
                     "interval": self.cfg["kline_interval"],
+                    "entry_mode": ("confirm_close" if (phase == "range" and self.cfg.get("range_confirm_close"))
+                                   else "intrabar"),
                     "exit_policy": "guardian_trailing" if is_trend else "fixed",
                     "dry_run": self.dry,
                     "entry_ts": int(time.time()),
@@ -602,6 +707,7 @@ class EntryBot:
                         signal_meta["order_failed"] = True
                         signal_meta["fail_msg"] = "수량 계산 실패 (진입 금액 부족 또는 계약 스펙 조회 실패)"
                         signal_result = "order_failed"
+                        notify.notify_order_failed(sym, signal, signal_meta["fail_msg"])
                     else:
                         signal_meta["size"] = size
                         res = self.client.place_order(
@@ -622,6 +728,13 @@ class EntryBot:
                             except Exception:
                                 pass
                             signal_result = "order_failed"
+                            notify.notify_order_failed(sym, signal,
+                                signal_meta.get("fail_detail") or signal_meta.get("fail_msg") or "unknown")
+                        else:
+                            notify.notify_entry(sym, signal, price, tp_price, sl_price,
+                                                strategy_used,
+                                                margin=signal_meta.get("margin"),
+                                                leverage=bot_cfg["leverage"], size=size)
                         # v3: 봇 자체 트레일링 제거 — 청산 관리는 Guardian이 전담.
                         # 추세 진입은 Guardian의 구조 인식 트레일링이 관리하고,
                         # 횡보 진입은 Guardian이 정책을 읽어 진입 SL/TP를 그대로 유지한다.

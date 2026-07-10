@@ -14,6 +14,7 @@ from flask_cors import CORS
 import urllib.request, urllib.parse
 import psycopg2, psycopg2.extras
 from apscheduler.schedulers.background import BackgroundScheduler
+import notify as tg_notify
 
 # stdout 버퍼링 비활성화 — Render 로그에 print()가 즉시 안 뜨는 문제 방지
 sys.stdout.reconfigure(line_buffering=True)
@@ -722,7 +723,7 @@ if db_ok:
         scheduler.add_job(midnight_job, 'cron', hour=0, minute=1)
         scheduler.add_job(today_job, 'interval', minutes=30)  # 30분마다 오늘 데이터 갱신
         scheduler.add_job(snapshot_job, 'cron', hour=23, minute=59)  # 자정 직전 포지션 스냅샷
-        scheduler.add_job(signals_sync_job, 'interval', minutes=30)  # 봇 신호 결과 자동 동기화
+        scheduler.add_job(signals_sync_job, 'interval', minutes=10)  # 봇 신호 결과 자동 동기화 (+청산 알림)
         scheduler.start()
         # 서버 완전 기동 후 백필 (10초 대기) + 시작 시점 스냅샷 1회 캡처
         threading.Thread(target=lambda: (time.sleep(10), capture_position_snapshot(), backfill(7)), daemon=True).start()
@@ -1474,7 +1475,8 @@ def _virtual_eval_core(limit=20):
             updates.append((sig_id, 'v_none', None, None, None))
             continue
 
-        candles = _fetch_candles_since(symbol, entry_ms)
+        eval_bar = meta.get('eval_bar', '5m')   # cascade_fade 등 단기 전략은 1분봉 판정
+        candles = _fetch_candles_since(symbol, entry_ms, bar=eval_bar)
         entry_price = float(meta.get('price', 0) or 0)
         verdict, v_pnl = None, None
         hi = lo = None   # MFE/MAE용 극값 추적 (판정 캔들까지)
@@ -1638,6 +1640,7 @@ def _sync_signals_core():
                 cur.execute('UPDATE bot_signals SET result=%s, pnl_usdt=%s, mfe_pct=%s, mae_pct=%s WHERE id=%s',
                             (result, pnl, mfe, mae, sig_id))
                 matched += 1
+                tg_notify.notify_close(symbol, side, result, pnl, mfe=mfe, mae=mae)
 
     for d in diag:
         print(f"[signals-sync] 미매칭 #{d['id']} {d['symbol']}: {d['why']}")

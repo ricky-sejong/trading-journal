@@ -1383,7 +1383,7 @@ function sigFmtWr(row){
   return '<span style="color:'+c+'">'+row.win_rate+'%</span> <span style="color:var(--muted);font-size:10px">('+row.wins+'/'+row.closed+')</span>';
 }
 
-var STRATEGY_LABELS={donchian_breakout:'돈치안 브레이크아웃',stochrsi_ema50:'StochRSI+EMA50'};
+var STRATEGY_LABELS={donchian_breakout:'돈치안 브레이크아웃',stochrsi_ema50:'StochRSI+EMA50',cascade_fade:'⚡연쇄청산 페이드 (측정중)'};
 
 function renderSignalAgg(elId,rows,keyLabel,keyFmt){
   var el=document.getElementById(elId);
