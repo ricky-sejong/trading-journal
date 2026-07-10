@@ -1,0 +1,319 @@
+"""
+backtest.py — 사이징/레버리지 그리드 백테스터
+==============================================
+라이브 봇(entry_bot.py)의 신호 판정 함수를 '그대로 import'해서 사용한다.
+→ 백테스트와 라이브의 전략 로직 불일치가 구조적으로 불가능.
+
+검증 대상:
+  1. 고정 금액 진입 vs 시드 % 복리 진입 — 어느 쪽 최종 수익/드로다운이 나은가
+  2. 레버리지 스윕 — 몇 배에서 수익률이 최대인가 (복리에선 변동성 드래그 때문에
+     '수익률 최대 레버리지'가 존재하며, 그 이상은 오히려 수익이 줄고 파산 위험만 커짐)
+
+사용법 (로컬 또는 Render 쉘에서 — OKX 공개 API라 API 키 불필요):
+  python backtest.py --symbols BTC-USDT-SWAP,ETH-USDT-SWAP,SOL-USDT-SWAP \
+      --days 90 --seed 100 --leverages 5,10,15,25,40 --pcts 5,10,15,25 --fixed 5,10
+  캔들 캐시: --cache candles.json (재실행 시 다운로드 생략)
+
+정직한 한계 (결과 해석 시 반드시 감안):
+  - 추세 청산: 라이브는 Guardian의 구조 인식 트레일링이지만 여기선 ATR×1.0
+    단순 트레일링으로 근사. 추세 성과는 근사치, 횡보(고정 SL/TP)는 정확.
+  - 같은 캔들에서 TP·SL 둘 다 터치 시 SL 우선 처리 (보수적 가정).
+  - 체결: 신호 캔들 종가 ± 슬리피지. 수수료 taker 0.05%/편도, 슬리피지 0.02%/편도 기본.
+"""
+
+import sys, os, json, math, time, argparse, urllib.request, urllib.parse
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import entry_bot as eb
+from indicators import calc_atr
+
+FEE_TAKER = 0.0005     # 편도 0.05%
+SLIPPAGE  = 0.0002     # 편도 0.02%
+COST_R    = 2 * (FEE_TAKER + SLIPPAGE)   # 왕복 비용 (가격수익률 차감분)
+
+
+# ─── 데이터 수집 (OKX 공개 API, 키 불필요) ─────────────────
+def fetch_history(inst_id, bar="15m", days=90):
+    """history-candles를 after 커서로 페이지네이션. 과거→현재 정렬 반환."""
+    need_ms = days * 86400 * 1000
+    start_ms = int(time.time() * 1000) - need_ms
+    out, after = [], None
+    for _ in range(2000):
+        q = {"instId": inst_id, "bar": bar, "limit": "100"}
+        if after:
+            q["after"] = after
+        url = "https://www.okx.com/api/v5/market/history-candles?" + urllib.parse.urlencode(q)
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            d = json.loads(r.read().decode())
+        data = d.get("data", [])
+        if d.get("code") != "0" or not data:
+            break
+        out.extend(data)
+        oldest = int(data[-1][0])
+        if oldest <= start_ms:
+            break
+        after = data[-1][0]
+        time.sleep(0.12)   # rate limit 보호
+    rows = [c for c in out if int(c[0]) >= start_ms]
+    rows.sort(key=lambda c: int(c[0]))
+    print(f"  {inst_id}: {len(rows)}개 캔들 ({days}일)")
+    return rows
+
+
+def load_or_fetch(symbols, days, bar, cache_path):
+    if cache_path and os.path.exists(cache_path):
+        with open(cache_path) as f:
+            cached = json.load(f)
+        if all(s in cached for s in symbols):
+            print(f"캐시 사용: {cache_path}")
+            return {s: cached[s] for s in symbols}
+    data = {}
+    print("OKX에서 캔들 다운로드 중...")
+    for s in symbols:
+        data[s] = fetch_history(s, bar, days)
+    if cache_path:
+        with open(cache_path, "w") as f:
+            json.dump(data, f)
+        print(f"캐시 저장: {cache_path}")
+    return data
+
+
+# ─── 신호 → 트레이드 시뮬레이션 (라이브 로직 재사용) ─────────
+def make_signal_bot():
+    """entry_bot의 판정 함수만 쓰는 인스턴스 (주문/DB 없음)"""
+    bot = eb.EntryBot.__new__(eb.EntryBot)
+    bot.cfg = dict(eb.DEFAULT_CONFIG)
+    bot._round_px = lambda sym, px: f"{px:.8f}"   # tickSz 조회 대신 고정밀 포맷
+    return bot
+
+
+def simulate_symbol(bot, sym, candles, warmup=100):
+    """
+    한 심볼의 트레이드 리스트 생성.
+    반환 트레이드: {entry_ts, exit_ts, side, entry, exit, r(비용차감 가격수익률),
+                   sl_pct, strategy, exit_kind}
+    """
+    closes  = [float(c[4]) for c in candles]
+    highs   = [float(c[2]) for c in candles]
+    lows    = [float(c[3]) for c in candles]
+    ts      = [int(c[0]) for c in candles]
+
+    trades = []
+    pos = None            # {side, entry, tp, sl, sl_pct, strategy, is_trend, i0, trail_ext}
+    last_signal = None
+    trail_mult = 1.0      # 추세 트레일링 근사: ATR×1.0 (Guardian 구조 트레일링의 근사)
+
+    for i in range(warmup, len(candles)):
+        h, l, c = highs[i], lows[i], closes[i]
+
+        # ── 보유 중이면 청산 체크 (이번 캔들 고저) ──
+        if pos:
+            hit_sl = (l <= pos["sl"]) if pos["side"] == "long" else (h >= pos["sl"])
+            hit_tp = (h >= pos["tp"]) if pos["side"] == "long" else (l <= pos["tp"])
+            exit_px, kind = None, None
+            if hit_sl:                       # 동시 터치 시 SL 우선 (보수적)
+                exit_px, kind = pos["sl"], "sl"
+            elif hit_tp:
+                exit_px, kind = pos["tp"], "tp"
+            if exit_px is not None:
+                raw = (exit_px - pos["entry"]) / pos["entry"]
+                if pos["side"] == "short":
+                    raw = -raw
+                trades.append({
+                    "entry_ts": pos["t0"], "exit_ts": ts[i],
+                    "side": pos["side"], "entry": pos["entry"], "exit": exit_px,
+                    "r": raw - COST_R, "sl_pct": pos["sl_pct"],
+                    "strategy": pos["strategy"], "exit_kind": kind, "symbol": sym,
+                })
+                pos = None
+            else:
+                # 추세 포지션 트레일링 (마감 캔들 기준 근사)
+                if pos["is_trend"]:
+                    atr_now = calc_atr(highs[i-20:i+1], lows[i-20:i+1], closes[i-20:i+1], 14)
+                    if atr_now:
+                        dist = atr_now * trail_mult
+                        if pos["side"] == "long":
+                            pos["trail_ext"] = max(pos["trail_ext"], h)
+                            pos["sl"] = max(pos["sl"], pos["trail_ext"] - dist)
+                        else:
+                            pos["trail_ext"] = min(pos["trail_ext"], l)
+                            pos["sl"] = min(pos["sl"], pos["trail_ext"] + dist)
+            if pos:
+                continue   # 보유 중엔 신규 신호 안 봄 (라이브와 동일)
+
+        # ── 신호 판정: 라이브와 동일 함수, 마감 캔들 시리즈 ──
+        window_c = closes[:i+1]
+        window_h = highs[:i+1]
+        window_l = lows[:i+1]
+        phase, bbw = bot._detect_market_phase(window_c)
+        if phase == "trend":
+            signal = bot._trend_signal(window_c, window_h, window_l)
+            strategy = "donchian_breakout"
+        elif phase == "range":
+            signal = bot._range_signal(window_c)
+            strategy = "stochrsi_ema50"
+        else:
+            signal = None
+            strategy = None
+
+        if signal is None:
+            last_signal = last_signal if signal is None else signal
+            continue
+        if signal == last_signal:
+            continue
+        last_signal = signal
+
+        atr = calc_atr(window_h[-30:], window_l[-30:], window_c[-30:], bot.cfg["atr_period"])
+        if not atr:
+            continue
+        is_trend = (phase == "trend")
+        entry = c * (1 + SLIPPAGE) if signal == "long" else c * (1 - SLIPPAGE)
+        tp_s, sl_s, sl_pct, tp_pct = bot._tp_sl_atr(sym, signal, entry, atr, is_trend)
+        pos = {
+            "side": signal, "entry": entry,
+            "tp": float(tp_s), "sl": float(sl_s), "sl_pct": sl_pct,
+            "strategy": strategy, "is_trend": is_trend,
+            "t0": ts[i], "trail_ext": entry,
+        }
+    return trades
+
+
+# ─── 사이징/레버리지 그리드 ────────────────────────────────
+def run_account(trades, seed, leverage, mode, param, max_positions=2):
+    """
+    시간순 트레이드 스트림에 계좌 시뮬레이션.
+    mode='fixed'  : param = 진입 마진 USDT 고정
+    mode='percent': param = 진입 시점 시드의 % (복리)
+    isolated 가정: 트레이드 손실은 마진까지로 캡 (그 이상 역행 = 해당 마진 전액 소실).
+    반환: {final, ret_pct, mdd_pct, taken, skipped, wipes, curve}
+    """
+    events = []
+    for t in trades:
+        events.append((t["entry_ts"], 0, "open", t))
+        events.append((t["exit_ts"], 1, "close", t))
+    events.sort(key=lambda e: (e[0], e[1]))
+
+    equity = seed
+    open_pos = {}          # id(trade) → margin
+    peak, mdd = seed, 0.0
+    taken = skipped = wipes = 0
+    curve = []
+
+    for ets, _, kind, t in events:
+        if kind == "open":
+            if len(open_pos) >= max_positions:
+                skipped += 1
+                continue
+            locked = sum(open_pos.values())
+            avail = equity - locked
+            margin = param if mode == "fixed" else equity * param / 100.0
+            margin = min(margin, avail * 0.95)
+            if margin < 1.0:      # 최소 진입 불가
+                skipped += 1
+                continue
+            open_pos[id(t)] = margin
+            taken += 1
+        else:
+            margin = open_pos.pop(id(t), None)
+            if margin is None:
+                continue
+            lev_r = leverage * t["r"]
+            if lev_r <= -1.0:      # isolated: 마진 전액 소실 (사실상 강제청산)
+                lev_r = -1.0
+                wipes += 1
+            equity += margin * lev_r
+            equity = max(equity, 0.0)
+            peak = max(peak, equity)
+            if peak > 0:
+                mdd = max(mdd, (peak - equity) / peak * 100)
+            curve.append((ets, round(equity, 4)))
+            if equity <= seed * 0.01:   # 사실상 파산
+                break
+
+    return {"final": round(equity, 2),
+            "ret_pct": round((equity - seed) / seed * 100, 1),
+            "mdd_pct": round(mdd, 1),
+            "taken": taken, "skipped": skipped, "wipes": wipes,
+            "curve": curve}
+
+
+def print_grid(trades, seed, leverages, pcts, fixed_amounts, max_positions):
+    rows = []
+    for lev in leverages:
+        for p in pcts:
+            r = run_account(trades, seed, lev, "percent", p, max_positions)
+            rows.append((f"복리 {p}%", lev, r))
+        for f in fixed_amounts:
+            r = run_account(trades, seed, lev, "fixed", f, max_positions)
+            rows.append((f"고정 {f}U", lev, r))
+
+    print(f"\n{'사이징':<10} {'레버리지':>6} {'최종잔고':>10} {'수익률':>8} "
+          f"{'MDD':>7} {'체결':>5} {'스킵':>5} {'전액소실':>7}")
+    print("-" * 66)
+    best = None
+    for name, lev, r in rows:
+        flag = " 💀" if r["final"] <= seed * 0.01 else ""
+        print(f"{name:<11} {lev:>5}x {r['final']:>10.2f} {r['ret_pct']:>7.1f}% "
+              f"{r['mdd_pct']:>6.1f}% {r['taken']:>5} {r['skipped']:>5} {r['wipes']:>7}{flag}")
+        if best is None or r["final"] > best[2]["final"]:
+            best = (name, lev, r)
+    print("-" * 66)
+    n, lev, r = best
+    print(f"최고 성과: {n} × {lev}x → 최종 {r['final']} (수익률 {r['ret_pct']}%, MDD {r['mdd_pct']}%)")
+    print("⚠ 백테스트 최적값은 과최적화 위험이 있으니, MDD가 감내 가능한 인접 구간을 함께 보세요.")
+
+
+def summarize_trades(trades):
+    n = len(trades)
+    if not n:
+        print("트레이드 없음"); return
+    wins = sum(1 for t in trades if t["r"] > 0)
+    by_strategy = {}
+    for t in trades:
+        s = by_strategy.setdefault(t["strategy"], [0, 0, 0.0])
+        s[0] += 1; s[1] += (1 if t["r"] > 0 else 0); s[2] += t["r"]
+    print(f"\n총 트레이드 {n}건 | 승률 {wins/n*100:.1f}% | "
+          f"평균 r(비용차감 가격수익률) {sum(t['r'] for t in trades)/n*100:.3f}%")
+    for k, (cnt, w, rsum) in by_strategy.items():
+        print(f"  {k}: {cnt}건, 승률 {w/cnt*100:.1f}%, 평균 r {rsum/cnt*100:.3f}%")
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--symbols", default="BTC-USDT-SWAP,ETH-USDT-SWAP,SOL-USDT-SWAP")
+    ap.add_argument("--days", type=int, default=90)
+    ap.add_argument("--bar", default="15m")
+    ap.add_argument("--seed", type=float, default=100.0)
+    ap.add_argument("--leverages", default="5,10,15,25,40")
+    ap.add_argument("--pcts", default="5,10,15,25")
+    ap.add_argument("--fixed", default="5,10")
+    ap.add_argument("--max-positions", type=int, default=2)
+    ap.add_argument("--cache", default="")
+    args = ap.parse_args()
+
+    symbols = [s.strip() for s in args.symbols.split(",") if s.strip()]
+    leverages = [int(x) for x in args.leverages.split(",")]
+    pcts = [float(x) for x in args.pcts.split(",")]
+    fixed = [float(x) for x in args.fixed.split(",")]
+
+    data = load_or_fetch(symbols, args.days, args.bar, args.cache)
+
+    bot = make_signal_bot()
+    all_trades = []
+    for sym in symbols:
+        if len(data[sym]) < 200:
+            print(f"  {sym}: 캔들 부족 — 제외"); continue
+        t = simulate_symbol(bot, sym, data[sym])
+        print(f"  {sym}: {len(t)}건 트레이드")
+        all_trades.extend(t)
+    all_trades.sort(key=lambda t: t["entry_ts"])
+
+    summarize_trades(all_trades)
+    print_grid(all_trades, args.seed, leverages, pcts, fixed, args.max_positions)
+    print("\n[해석 주의] 추세 청산은 Guardian 구조 트레일링을 ATR×1.0으로 근사한 값이며,")
+    print("동시 TP/SL 터치는 SL 우선(보수적) 처리. 실전 수치는 이 결과보다 좋을 수도 나쁠 수도 있음.")
+
+
+if __name__ == "__main__":
+    main()
