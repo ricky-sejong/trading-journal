@@ -32,6 +32,7 @@ except Exception:
 
 # 공용 모듈 (okx_client.py / indicators.py / bot_db.py)
 from okx_client import OKXClient
+import notify
 from indicators import calc_atr
 import bot_db
 
@@ -893,6 +894,7 @@ class PositionGuardian:
             del self.state["positions"][k]
             self._algo_cache.pop(k, None)
             log.info(f"  🧹 청산된 포지션 state 정리: {k}")
+            notify.notify_position_closed_detected(k)
         # 봇이 꺼둔 guardian_pos 플래그도 청산 시 삭제
         # (안 지우면 이후 같은 심볼·방향 '수동' 포지션이 Guardian 관리를 계속 못 받음)
         if stale:
@@ -921,6 +923,7 @@ class PositionGuardian:
                 if not self.dry:
                     res = self.client.close_position_market(inst_id, side)
                     log.warning(f"     긴급 청산 결과: {res}")
+                    notify.notify_emergency(inst_id, side, f"청산 응답 code={res.get('code')}")
                 else:
                     log.warning("     [DRY-RUN] 긴급 청산 생략")
                 continue
