@@ -1642,6 +1642,20 @@ function renderBacktest(res){
     '<div class="metric"><div class="m-label">WIN RATE</div><div class="m-val">'+(s.win_rate!==null?s.win_rate+'%':'—')+'</div></div>'+
     '<div class="metric"><div class="m-label">AVG r</div><div class="m-val '+((s.avg_r_pct||0)>=0?'pos':'neg')+'">'+(s.avg_r_pct!==null?s.avg_r_pct+'%':'—')+'</div></div>'+
     '<div class="metric"><div class="m-label">PERIOD</div><div class="m-val" style="font-size:14px">'+s.days+'D · '+s.symbols.length+'심볼</div></div>';
+  var sens=res.sensitivity;
+  if(sens){
+    var lo=sens.avg_r_sl_first_pct, hi=sens.avg_r_tp_first_pct;
+    var verdict, vc;
+    if(hi!==null&&hi<0){verdict='상한도 음수 → 전략 기대값이 음수 (판정 해상도 문제 아님)';vc='var(--red)';}
+    else if(lo!==null&&lo>0){verdict='하한도 양수 → 전략 기대값 양수';vc='var(--green)';}
+    else{verdict='부호가 갈림 → 15분봉 해상도 한계, 동시터치 정밀 판정 필요';vc='var(--yellow)';}
+    document.getElementById('bt-metrics').insertAdjacentHTML('afterend',
+      '<div style="font-family:var(--mono);font-size:11px;margin:0 0 14px 0;padding:10px 12px;background:var(--bg2);border:1px solid var(--border2)">'+
+      '동시터치(같은 캔들 TP·SL 모두 접촉): '+sens.ambiguous_n+'건 ('+sens.ambiguous_pct+'%) · '+
+      '평균 r 범위: <span style="color:var(--red)">'+lo+'%</span> (전부SL 가정) ~ <span style="color:var(--green)">'+hi+'%</span> (전부TP 가정) · '+
+      '누적 비용 드래그: '+sens.cost_drag_total_pct+'%p<br>'+
+      '<span style="color:'+vc+'">▶ '+verdict+'</span></div>');
+  }
 
   var stEl=document.getElementById('bt-strategy');
   var stRows=(res.by_strategy||[]).map(function(r){

@@ -112,19 +112,23 @@ def simulate_symbol(bot, sym, candles, warmup=100):
             hit_sl = (l <= pos["sl"]) if pos["side"] == "long" else (h >= pos["sl"])
             hit_tp = (h >= pos["tp"]) if pos["side"] == "long" else (l <= pos["tp"])
             exit_px, kind = None, None
-            if hit_sl:                       # 동시 터치 시 SL 우선 (보수적)
+            ambiguous = hit_sl and hit_tp    # 같은 캔들에서 둘 다 터치 → 순서 불명
+            if hit_sl:                       # 기본 처리: SL 우선 (보수적 하한)
                 exit_px, kind = pos["sl"], "sl"
             elif hit_tp:
                 exit_px, kind = pos["tp"], "tp"
             if exit_px is not None:
-                raw = (exit_px - pos["entry"]) / pos["entry"]
-                if pos["side"] == "short":
-                    raw = -raw
+                def _r(px):
+                    raw = (px - pos["entry"]) / pos["entry"]
+                    return (-raw if pos["side"] == "short" else raw) - COST_R
                 trades.append({
                     "entry_ts": pos["t0"], "exit_ts": ts[i],
                     "side": pos["side"], "entry": pos["entry"], "exit": exit_px,
-                    "r": raw - COST_R, "sl_pct": pos["sl_pct"],
+                    "r": _r(exit_px), "sl_pct": pos["sl_pct"],
                     "strategy": pos["strategy"], "exit_kind": kind, "symbol": sym,
+                    "ambiguous": ambiguous,
+                    # 동시 터치 시 'TP가 먼저였다면'의 수익률 (민감도 상한 계산용)
+                    "r_tp_first": _r(pos["tp"]) if ambiguous else None,
                 })
                 pos = None
             else:
@@ -311,6 +315,12 @@ def run_backtest(symbols, days=90, seed=100.0, leverages=(5,10,15,25,40),
     report(stage="grid", done=0, total=1)
     n = len(all_trades)
     wins = sum(1 for t in all_trades if t["r"] > 0)
+
+    # ── 동시 터치 민감도: 진짜 기대값은 [전부SL, 전부TP] 사이 ──
+    amb = [t for t in all_trades if t.get("ambiguous")]
+    r_sl_first = sum(t["r"] for t in all_trades) / n if n else 0
+    r_tp_first = (sum((t["r_tp_first"] if t.get("ambiguous") else t["r"]) for t in all_trades) / n) if n else 0
+    cost_drag_total = n * COST_R * 100   # 누적 비용 (가격수익률 %p 합)
     by_strategy = {}
     for t in all_trades:
         s = by_strategy.setdefault(t["strategy"], {"n": 0, "wins": 0, "r_sum": 0.0})
@@ -339,8 +349,17 @@ def run_backtest(symbols, days=90, seed=100.0, leverages=(5,10,15,25,40),
     return {
         "summary": {"trades": n,
                     "win_rate": round(wins/n*100, 1) if n else None,
-                    "avg_r_pct": round(sum(t["r"] for t in all_trades)/n*100, 3) if n else None,
+                    "avg_r_pct": round(r_sl_first*100, 3) if n else None,
                     "symbols": list(symbols), "days": days, "seed": seed},
+        "sensitivity": {
+            "ambiguous_n": len(amb),
+            "ambiguous_pct": round(len(amb)/n*100, 1) if n else 0,
+            "avg_r_sl_first_pct": round(r_sl_first*100, 3) if n else None,   # 현재 그리드 기준 (하한)
+            "avg_r_tp_first_pct": round(r_tp_first*100, 3) if n else None,   # 낙관 상한
+            "cost_drag_total_pct": round(cost_drag_total, 1),
+            "note": ("진짜 기대값은 두 값 사이. 상한도 음수면 전략 자체가 음수, "
+                     "부호가 갈리면 15분봉 해상도 한계 → 하위 타임프레임 판정 필요."),
+        },
         "by_strategy": strategy_rows,
         "grid": grid,
         "best": best,
