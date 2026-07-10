@@ -1661,6 +1661,86 @@ def sync_signal_results():
     except Exception as e:
         return jsonify({'ok': False, 'msg': str(e)})
 
+# ── 백테스트 (대시보드에서 실행 — 쉘 불필요) ─────────────
+_backtest_state = {"running": False, "progress": None, "result": None, "error": None, "started_at": None}
+_backtest_candle_cache = {}   # (symbol, days, bar) → candles (프로세스 생존 동안 재사용)
+
+def _run_backtest_thread(params):
+    global _backtest_state
+    try:
+        import backtest as bt
+        symbols = params["symbols"]
+        days = params["days"]
+        # 캔들 캐시 활용 (같은 조건 재실행 시 다운로드 생략)
+        candle_data = {}
+        need_fetch = []
+        for s in symbols:
+            key = (s, days, "15m")
+            if key in _backtest_candle_cache:
+                candle_data[s] = _backtest_candle_cache[key]
+            else:
+                need_fetch.append(s)
+        for idx, s in enumerate(need_fetch):
+            _backtest_state["progress"] = {"stage": "download", "symbol": s,
+                                           "done": idx, "total": len(need_fetch)}
+            candles = bt.fetch_history(s, "15m", days)
+            candle_data[s] = candles
+            _backtest_candle_cache[(s, days, "15m")] = candles
+
+        def prog(d):
+            _backtest_state["progress"] = d
+        result = bt.run_backtest(
+            symbols, days=days, seed=params["seed"],
+            leverages=params["leverages"], pcts=params["pcts"],
+            fixed=params["fixed"], max_positions=params["max_positions"],
+            candle_data=candle_data, progress=prog)
+        _backtest_state["result"] = result
+        _backtest_state["error"] = None
+        print(f"[backtest] 완료: {result['summary']['trades']}건, 그리드 {len(result['grid'])}행")
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        _backtest_state["error"] = str(e)
+    finally:
+        _backtest_state["running"] = False
+        _backtest_state["progress"] = None
+
+@app.route('/api/backtest/run', methods=['POST'])
+def backtest_run():
+    global _backtest_state
+    if _backtest_state["running"]:
+        return jsonify({'ok': False, 'msg': '이미 실행 중입니다. 완료 후 다시 시도하세요.'})
+    try:
+        body = request.get_json(force=True) or {}
+        params = {
+            "symbols": [s.strip().upper() for s in (body.get("symbols") or
+                        "BTC-USDT-SWAP,ETH-USDT-SWAP,SOL-USDT-SWAP").split(",") if s.strip()],
+            "days": min(int(body.get("days", 90)), 180),
+            "seed": float(body.get("seed", 100)),
+            "leverages": [int(x) for x in str(body.get("leverages", "5,10,15,25,40")).split(",")],
+            "pcts": [float(x) for x in str(body.get("pcts", "5,10,15,25")).split(",")],
+            "fixed": [float(x) for x in str(body.get("fixed", "5,10")).split(",")],
+            "max_positions": int(body.get("max_positions", 2)),
+        }
+        if len(params["symbols"]) > 6:
+            return jsonify({'ok': False, 'msg': '심볼은 최대 6개까지 가능합니다.'})
+        _backtest_state = {"running": True, "progress": {"stage": "start"},
+                           "result": None, "error": None,
+                           "started_at": datetime.datetime.now(tz=KST).strftime('%H:%M:%S')}
+        threading.Thread(target=_run_backtest_thread, args=(params,), daemon=True).start()
+        return jsonify({'ok': True, 'msg': '백테스트 시작'})
+    except Exception as e:
+        _backtest_state["running"] = False
+        return jsonify({'ok': False, 'msg': str(e)})
+
+@app.route('/api/backtest/status')
+def backtest_status():
+    return jsonify({'ok': True,
+                    'running': _backtest_state["running"],
+                    'progress': _backtest_state["progress"],
+                    'result': _backtest_state["result"],
+                    'error': _backtest_state["error"],
+                    'started_at': _backtest_state["started_at"]})
+
 if __name__ == '__main__':
     print('='*50)
     print(' OKX 매매일지 (Render + Supabase)')

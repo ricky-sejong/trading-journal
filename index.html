@@ -329,6 +329,9 @@ body{font-family:var(--sans);background:var(--bg);color:var(--text);min-height:1
     <div class="nav-item" onclick="switchPanel('signals')">
       <span class="nav-icon">▪</span> BOT SIGNALS
     </div>
+    <div class="nav-item" onclick="switchPanel('backtest')">
+      <span class="nav-icon">▪</span> BACKTEST
+    </div>
   </nav>
   <div class="sidebar-footer">
     <div class="conn-indicator">
@@ -503,6 +506,42 @@ body{font-family:var(--sans);background:var(--bg);color:var(--text);min-height:1
     </div>
   </div>
 
+  <!-- 백테스트 -->
+  <div class="panel" id="p-backtest">
+    <div class="panel-header">
+      <span class="panel-title">BACKTEST</span>
+      <span class="panel-sub" id="bt-sub">사이징 × 레버리지 그리드 — 라이브와 동일한 신호 로직</span>
+    </div>
+
+    <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;margin-bottom:14px;font-family:var(--mono);font-size:10px;color:var(--muted)">
+      <label style="display:flex;flex-direction:column;gap:3px">심볼 (쉼표 구분)
+        <input id="bt-symbols" value="BTC-USDT-SWAP,ETH-USDT-SWAP,SOL-USDT-SWAP" style="width:300px;font-family:var(--mono);font-size:11px;background:var(--bg3);border:1px solid var(--border2);color:var(--text);padding:5px 6px;outline:none"></label>
+      <label style="display:flex;flex-direction:column;gap:3px">기간(일)
+        <input id="bt-days" type="number" value="90" min="7" max="180" style="width:55px;font-family:var(--mono);font-size:11px;background:var(--bg3);border:1px solid var(--border2);color:var(--text);padding:5px 6px;outline:none"></label>
+      <label style="display:flex;flex-direction:column;gap:3px">시드(USDT)
+        <input id="bt-seed" type="number" value="100" min="10" style="width:60px;font-family:var(--mono);font-size:11px;background:var(--bg3);border:1px solid var(--border2);color:var(--text);padding:5px 6px;outline:none"></label>
+      <label style="display:flex;flex-direction:column;gap:3px">레버리지 목록
+        <input id="bt-levs" value="5,10,15,25,40" style="width:100px;font-family:var(--mono);font-size:11px;background:var(--bg3);border:1px solid var(--border2);color:var(--text);padding:5px 6px;outline:none"></label>
+      <label style="display:flex;flex-direction:column;gap:3px">복리 %
+        <input id="bt-pcts" value="5,10,15,25" style="width:90px;font-family:var(--mono);font-size:11px;background:var(--bg3);border:1px solid var(--border2);color:var(--text);padding:5px 6px;outline:none"></label>
+      <label style="display:flex;flex-direction:column;gap:3px">고정 USDT
+        <input id="bt-fixed" value="5,10" style="width:60px;font-family:var(--mono);font-size:11px;background:var(--bg3);border:1px solid var(--border2);color:var(--text);padding:5px 6px;outline:none"></label>
+      <button class="sm-btn" id="bt-run" onclick="runBacktest()" style="height:27px">RUN</button>
+    </div>
+
+    <div id="bt-progress" style="font-family:var(--mono);font-size:11px;color:var(--yellow);margin-bottom:12px;display:none"></div>
+    <div class="metrics" id="bt-metrics"></div>
+    <div class="table-wrap" id="bt-strategy-wrap" style="display:none">
+      <div class="table-label">전략별 (사이징 무관 트레이드 통계)</div>
+      <div id="bt-strategy"></div>
+    </div>
+    <div class="table-wrap" id="bt-grid-wrap" style="display:none">
+      <div class="table-label">사이징 × 레버리지 그리드</div>
+      <div id="bt-grid"></div>
+      <div id="bt-caveat" style="font-family:var(--mono);font-size:10px;color:var(--muted);margin-top:8px"></div>
+    </div>
+  </div>
+
 </div><!-- /main -->
 </div><!-- /app -->
 
@@ -527,6 +566,10 @@ body{font-family:var(--sans);background:var(--bg);color:var(--text);min-height:1
   <button class="mobile-tab" id="mtab-signals" onclick="switchPanel('signals')">
     <span class="mobile-tab-icon">📡</span>
     <span>SIGNALS</span>
+  </button>
+  <button class="mobile-tab" id="mtab-backtest" onclick="switchPanel('backtest')">
+    <span class="mobile-tab-icon">🧪</span>
+    <span>TEST</span>
   </button>
 </nav>
 
@@ -1335,7 +1378,7 @@ function renderHistory(){
 function renderAll(){renderBanner(journalData);renderMetrics(journalData);renderChart(journalData);renderRecent(journalData);}
 
 function switchPanel(panel){
-  var panels=['dashboard','calendar','history','trades','signals'];
+  var panels=['dashboard','calendar','history','trades','signals','backtest'];
   // 사이드바 (데스크탑)
   document.querySelectorAll('.nav-item').forEach(function(el,i){el.classList.toggle('active',panels[i]===panel);});
   // 모바일 하단 탭바
@@ -1353,6 +1396,7 @@ function switchPanel(panel){
   if(panel==='history')loadJournal(function(){renderHistory();});
   if(panel==='trades'){checkConn();loadGuardianPosConfig();startAutoRefresh();}
   if(panel==='signals')loadSignalPanel();
+  if(panel==='backtest')pollBacktest(true);
   if(panel!=='trades')stopAutoRefresh();
 }
 
@@ -1541,6 +1585,88 @@ function syncSignalResults(){
       }
     })
     .catch(function(e){btn.disabled=false;btn.textContent='SYNC RESULTS';document.getElementById('signals-sub').textContent='SYNC ERROR: '+e.message;});
+}
+
+/* ── BACKTEST 패널 ── */
+var btTimer=null;
+
+function runBacktest(){
+  var body={
+    symbols:document.getElementById('bt-symbols').value,
+    days:parseInt(document.getElementById('bt-days').value)||90,
+    seed:parseFloat(document.getElementById('bt-seed').value)||100,
+    leverages:document.getElementById('bt-levs').value,
+    pcts:document.getElementById('bt-pcts').value,
+    fixed:document.getElementById('bt-fixed').value
+  };
+  document.getElementById('bt-run').disabled=true;
+  fetch(SERVER+'/api/backtest/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
+    .then(function(r){return r.json();})
+    .then(function(d){
+      if(!d.ok){alert(d.msg);document.getElementById('bt-run').disabled=false;return;}
+      pollBacktest(false);
+    })
+    .catch(function(e){alert('요청 실패: '+e.message);document.getElementById('bt-run').disabled=false;});
+}
+
+function pollBacktest(once){
+  if(btTimer){clearInterval(btTimer);btTimer=null;}
+  var tick=function(){
+    fetch(SERVER+'/api/backtest/status',{signal:AbortSignal.timeout(8000)})
+      .then(function(r){return r.json();})
+      .then(function(d){
+        var prog=document.getElementById('bt-progress');
+        if(d.running){
+          prog.style.display='block';
+          var p=d.progress||{};
+          var stageLabels={start:'준비 중',download:'캔들 다운로드',simulate:'전략 시뮬레이션',grid:'사이징 그리드 계산'};
+          prog.textContent='⏳ 실행 중 ('+(d.started_at||'')+' 시작) — '+(stageLabels[p.stage]||p.stage||'')+(p.symbol?' : '+p.symbol:'')+(p.total?' ('+(p.done+1)+'/'+p.total+')':'');
+          document.getElementById('bt-run').disabled=true;
+        }else{
+          prog.style.display='none';
+          document.getElementById('bt-run').disabled=false;
+          if(btTimer){clearInterval(btTimer);btTimer=null;}
+          if(d.error){prog.style.display='block';prog.textContent='❌ 오류: '+d.error;}
+          if(d.result)renderBacktest(d.result);
+        }
+      }).catch(function(){});
+  };
+  tick();
+  if(!once)btTimer=setInterval(tick,2000);
+}
+
+function renderBacktest(res){
+  var s=res.summary;
+  document.getElementById('bt-metrics').innerHTML=
+    '<div class="metric"><div class="m-label">TRADES</div><div class="m-val">'+s.trades+'</div></div>'+
+    '<div class="metric"><div class="m-label">WIN RATE</div><div class="m-val">'+(s.win_rate!==null?s.win_rate+'%':'—')+'</div></div>'+
+    '<div class="metric"><div class="m-label">AVG r</div><div class="m-val '+((s.avg_r_pct||0)>=0?'pos':'neg')+'">'+(s.avg_r_pct!==null?s.avg_r_pct+'%':'—')+'</div></div>'+
+    '<div class="metric"><div class="m-label">PERIOD</div><div class="m-val" style="font-size:14px">'+s.days+'D · '+s.symbols.length+'심볼</div></div>';
+
+  var stEl=document.getElementById('bt-strategy');
+  var stRows=(res.by_strategy||[]).map(function(r){
+    return '<tr><td>'+(STRATEGY_LABELS[r.strategy]||r.strategy)+'</td><td>'+r.n+'</td>'+
+      '<td>'+(r.win_rate!==null?r.win_rate+'%':'—')+'</td>'+
+      '<td class="'+((r.avg_r_pct||0)>=0?'pos':'neg')+'" style="color:'+((r.avg_r_pct||0)>=0?'var(--green)':'var(--red)')+'">'+r.avg_r_pct+'%</td></tr>';
+  }).join('');
+  stEl.innerHTML='<table class="data-table"><thead><tr><th>전략</th><th>N</th><th>WIN RATE</th><th>AVG r</th></tr></thead><tbody>'+stRows+'</tbody></table>';
+  document.getElementById('bt-strategy-wrap').style.display='block';
+
+  var best=res.best||{};
+  var rows=(res.grid||[]).map(function(r){
+    var name=(r.mode==='percent'?'복리 '+r.param+'%':'고정 '+r.param+'U');
+    var isBest=(r.mode===best.mode&&r.param===best.param&&r.leverage===best.leverage);
+    var retColor=r.ret_pct>=0?'var(--green)':'var(--red)';
+    return '<tr'+(isBest?' style="background:rgba(245,197,24,0.08)"':'')+'>'+
+      '<td>'+name+(isBest?' ⭐':'')+'</td><td>'+r.leverage+'x</td>'+
+      '<td>'+r.final.toFixed(2)+'</td>'+
+      '<td style="color:'+retColor+'">'+(r.ret_pct>=0?'+':'')+r.ret_pct+'%</td>'+
+      '<td style="color:var(--red)">'+r.mdd_pct+'%</td>'+
+      '<td>'+r.taken+'</td><td>'+r.wipes+(r.busted?' 💀':'')+'</td></tr>';
+  }).join('');
+  document.getElementById('bt-grid').innerHTML='<table class="data-table"><thead><tr><th>사이징</th><th>레버리지</th><th>최종잔고</th><th>수익률</th><th>MDD</th><th>체결</th><th>전액소실</th></tr></thead><tbody>'+rows+'</tbody></table>';
+  document.getElementById('bt-caveat').textContent='⚠ '+(res.caveat||'')+' 최적값(⭐)은 과최적화 위험 — MDD가 감내 가능한 인접 구간을 함께 볼 것.';
+  document.getElementById('bt-grid-wrap').style.display='block';
 }
 
 /* ── 초기화 ── */

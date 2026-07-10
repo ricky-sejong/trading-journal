@@ -142,10 +142,13 @@ def simulate_symbol(bot, sym, candles, warmup=100):
             if pos:
                 continue   # 보유 중엔 신규 신호 안 봄 (라이브와 동일)
 
-        # ── 신호 판정: 라이브와 동일 함수, 마감 캔들 시리즈 ──
-        window_c = closes[:i+1]
-        window_h = highs[:i+1]
-        window_l = lows[:i+1]
+        # ── 신호 판정: 라이브와 동일 함수 + 동일 창 크기 ──
+        # 라이브 봇은 항상 최근 kline_limit(100)개 캔들만 조회하므로 백테스트도 동일하게.
+        # (전체 슬라이스 대비 수십 배 빠르고, 지표 워밍업 조건도 라이브와 일치)
+        w = bot.cfg["kline_limit"]
+        window_c = closes[i+1-w:i+1]
+        window_h = highs[i+1-w:i+1]
+        window_l = lows[i+1-w:i+1]
         phase, bbw = bot._detect_market_phase(window_c)
         if phase == "trend":
             signal = bot._trend_signal(window_c, window_h, window_l)
@@ -277,6 +280,73 @@ def summarize_trades(trades):
           f"평균 r(비용차감 가격수익률) {sum(t['r'] for t in trades)/n*100:.3f}%")
     for k, (cnt, w, rsum) in by_strategy.items():
         print(f"  {k}: {cnt}건, 승률 {w/cnt*100:.1f}%, 평균 r {rsum/cnt*100:.3f}%")
+
+
+def run_backtest(symbols, days=90, seed=100.0, leverages=(5,10,15,25,40),
+                 pcts=(5,10,15,25), fixed=(5,10), max_positions=2,
+                 bar="15m", progress=None, candle_data=None):
+    """
+    서버/코드에서 직접 호출하는 진입점. progress(dict) 콜백으로 진행 상황 보고.
+    반환: {'summary': {...}, 'by_strategy': [...], 'grid': [...], 'best': {...}}
+    """
+    def report(**kw):
+        if progress:
+            progress(kw)
+
+    if candle_data is None:
+        candle_data = {}
+        for idx, s in enumerate(symbols):
+            report(stage="download", symbol=s, done=idx, total=len(symbols))
+            candle_data[s] = fetch_history(s, bar, days)
+
+    bot = make_signal_bot()
+    all_trades = []
+    for idx, sym in enumerate(symbols):
+        report(stage="simulate", symbol=sym, done=idx, total=len(symbols))
+        if len(candle_data.get(sym, [])) < 200:
+            continue
+        all_trades.extend(simulate_symbol(bot, sym, candle_data[sym]))
+    all_trades.sort(key=lambda t: t["entry_ts"])
+
+    report(stage="grid", done=0, total=1)
+    n = len(all_trades)
+    wins = sum(1 for t in all_trades if t["r"] > 0)
+    by_strategy = {}
+    for t in all_trades:
+        s = by_strategy.setdefault(t["strategy"], {"n": 0, "wins": 0, "r_sum": 0.0})
+        s["n"] += 1; s["wins"] += (1 if t["r"] > 0 else 0); s["r_sum"] += t["r"]
+    strategy_rows = [{
+        "strategy": k, "n": v["n"],
+        "win_rate": round(v["wins"]/v["n"]*100, 1) if v["n"] else None,
+        "avg_r_pct": round(v["r_sum"]/v["n"]*100, 3) if v["n"] else None,
+    } for k, v in by_strategy.items()]
+
+    grid = []
+    best = None
+    combos = [("percent", p) for p in pcts] + [("fixed", f) for f in fixed]
+    for lev in leverages:
+        for mode, param in combos:
+            r = run_account(all_trades, seed, lev, mode, param, max_positions)
+            row = {"mode": mode, "param": param, "leverage": lev,
+                   "final": r["final"], "ret_pct": r["ret_pct"],
+                   "mdd_pct": r["mdd_pct"], "taken": r["taken"],
+                   "skipped": r["skipped"], "wipes": r["wipes"],
+                   "busted": r["final"] <= seed * 0.01}
+            grid.append(row)
+            if best is None or row["final"] > best["final"]:
+                best = row
+
+    return {
+        "summary": {"trades": n,
+                    "win_rate": round(wins/n*100, 1) if n else None,
+                    "avg_r_pct": round(sum(t["r"] for t in all_trades)/n*100, 3) if n else None,
+                    "symbols": list(symbols), "days": days, "seed": seed},
+        "by_strategy": strategy_rows,
+        "grid": grid,
+        "best": best,
+        "caveat": ("추세 청산은 Guardian 구조 트레일링의 ATR×1.0 근사, "
+                   "동시 TP/SL 터치는 SL 우선(보수적). 수수료 0.05%+슬리피지 0.02%/편도 반영."),
+    }
 
 
 def main():
