@@ -135,15 +135,18 @@ class OKXClient:
         return 0.0
 
     def get_balance_detail(self, ccy="USDT"):
-        """(cashBal, availBal) 반환.
-        cashBal = 미실현손익 제외 실제 현금 잔고 — 복리 사이징의 기준."""
+        """(seed, availBal) 반환. seed = eq − upl (미실현손익 제외 총잔고).
+        cashBal은 isolated 포지션에 배정된 마진이 빠져서 '잔고의 %' 의도와 어긋남:
+        잔고 100에서 마진 10 배정 시 cashBal=90 → 다음 진입이 9로 축소되는 버그.
+        eq(총자산) − upl(미실현)은 포지션 마진을 포함한 실제 잔고를 준다."""
         d = self._req("GET", "/api/v5/account/balance", {"ccy": ccy})
         try:
             for item in d["data"][0]["details"]:
                 if item["ccy"] == ccy:
-                    cash  = float(item.get("cashBal", 0) or 0)
+                    eq    = float(item.get("eq", 0) or 0)
+                    upl   = float(item.get("upl", 0) or 0)
                     avail = float(item.get("availBal", 0) or 0)
-                    return cash, avail
+                    return eq - upl, avail
         except Exception:
             pass
         return 0.0, 0.0
