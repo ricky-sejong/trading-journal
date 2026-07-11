@@ -27,9 +27,13 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import entry_bot as eb
 from indicators import calc_atr
 
-FEE_TAKER = 0.0005     # 편도 0.05%
+FEE_TAKER = 0.0005     # 편도 0.05% (시장가)
+FEE_MAKER = 0.0002     # 편도 0.02% (지정가)
 SLIPPAGE  = 0.0002     # 편도 0.02%
-COST_R    = 2 * (FEE_TAKER + SLIPPAGE)   # 왕복 비용 (가격수익률 차감분)
+def cost_round_trip(fee_mode="taker"):
+    fee = FEE_MAKER if fee_mode == "maker" else FEE_TAKER
+    slip = 0.00005 if fee_mode == "maker" else SLIPPAGE   # 지정가는 슬리피지 거의 없음(체결실패 리스크로 대체)
+    return 2 * (fee + slip)
 
 
 # ─── 데이터 수집 (OKX 공개 API, 키 불필요) ─────────────────
@@ -80,15 +84,18 @@ def load_or_fetch(symbols, days, bar, cache_path):
 
 
 # ─── 신호 → 트레이드 시뮬레이션 (라이브 로직 재사용) ─────────
-def make_signal_bot():
-    """entry_bot의 판정 함수만 쓰는 인스턴스 (주문/DB 없음)"""
+def make_signal_bot(overrides=None):
+    """entry_bot의 판정 함수만 쓰는 인스턴스 (주문/DB 없음).
+    overrides: 실험용 cfg 덮어쓰기 (예: range_tp_atr, bbw_range_thresh)"""
     bot = eb.EntryBot.__new__(eb.EntryBot)
     bot.cfg = dict(eb.DEFAULT_CONFIG)
+    if overrides:
+        bot.cfg.update(overrides)
     bot._round_px = lambda sym, px: f"{px:.8f}"   # tickSz 조회 대신 고정밀 포맷
     return bot
 
 
-def simulate_symbol(bot, sym, candles, warmup=100):
+def simulate_symbol(bot, sym, candles, warmup=100, cost_r=None, htf_filter=False):
     """
     한 심볼의 트레이드 리스트 생성.
     반환 트레이드: {entry_ts, exit_ts, side, entry, exit, r(비용차감 가격수익률),
@@ -98,6 +105,13 @@ def simulate_symbol(bot, sym, candles, warmup=100):
     highs   = [float(c[2]) for c in candles]
     lows    = [float(c[3]) for c in candles]
     ts      = [int(c[0]) for c in candles]
+
+    if cost_r is None:
+        cost_r = cost_round_trip("taker")
+    COST_R = cost_r
+
+    # HTF 추세 필터: 15분봉 EMA200 ≈ 1시간봉 EMA50 방향 (전 구간 O(n) 사전계산)
+    ema_htf = eb.calc_ema(closes, 200) if htf_filter else None
 
     trades = []
     pos = None            # {side, entry, tp, sl, sl_pct, strategy, is_trend, i0, trail_ext}
@@ -163,6 +177,16 @@ def simulate_symbol(bot, sym, candles, warmup=100):
         else:
             signal = None
             strategy = None
+
+        # HTF 필터: 횡보 신호는 상위 추세와 순방향만 허용
+        if signal and htf_filter and strategy == "stochrsi_ema50":
+            e = ema_htf[i]
+            if e is None:
+                signal = None            # EMA200 워밍업 전 — 판정 보류
+            elif signal == "long" and closes[i] <= e:
+                signal = None
+            elif signal == "short" and closes[i] >= e:
+                signal = None
 
         if signal is None:
             last_signal = last_signal if signal is None else signal
@@ -288,7 +312,8 @@ def summarize_trades(trades):
 
 def run_backtest(symbols, days=90, seed=100.0, leverages=(5,10,15,25,40),
                  pcts=(5,10,15,25), fixed=(5,10), max_positions=2,
-                 bar="15m", progress=None, candle_data=None):
+                 bar="15m", progress=None, candle_data=None,
+                 fee_mode="taker", htf_filter=False, cfg_overrides=None):
     """
     서버/코드에서 직접 호출하는 진입점. progress(dict) 콜백으로 진행 상황 보고.
     반환: {'summary': {...}, 'by_strategy': [...], 'grid': [...], 'best': {...}}
@@ -303,13 +328,15 @@ def run_backtest(symbols, days=90, seed=100.0, leverages=(5,10,15,25,40),
             report(stage="download", symbol=s, done=idx, total=len(symbols))
             candle_data[s] = fetch_history(s, bar, days)
 
-    bot = make_signal_bot()
+    bot = make_signal_bot(cfg_overrides)
+    cost_r = cost_round_trip(fee_mode)
     all_trades = []
     for idx, sym in enumerate(symbols):
         report(stage="simulate", symbol=sym, done=idx, total=len(symbols))
         if len(candle_data.get(sym, [])) < 200:
             continue
-        all_trades.extend(simulate_symbol(bot, sym, candle_data[sym]))
+        all_trades.extend(simulate_symbol(bot, sym, candle_data[sym],
+                                          cost_r=cost_r, htf_filter=htf_filter))
     all_trades.sort(key=lambda t: t["entry_ts"])
 
     report(stage="grid", done=0, total=1)
@@ -320,7 +347,7 @@ def run_backtest(symbols, days=90, seed=100.0, leverages=(5,10,15,25,40),
     amb = [t for t in all_trades if t.get("ambiguous")]
     r_sl_first = sum(t["r"] for t in all_trades) / n if n else 0
     r_tp_first = (sum((t["r_tp_first"] if t.get("ambiguous") else t["r"]) for t in all_trades) / n) if n else 0
-    cost_drag_total = n * COST_R * 100   # 누적 비용 (가격수익률 %p 합)
+    cost_drag_total = n * cost_r * 100   # 누적 비용 (가격수익률 %p 합)
     by_strategy = {}
     for t in all_trades:
         s = by_strategy.setdefault(t["strategy"], {"n": 0, "wins": 0, "r_sum": 0.0})
@@ -363,6 +390,12 @@ def run_backtest(symbols, days=90, seed=100.0, leverages=(5,10,15,25,40),
         "by_strategy": strategy_rows,
         "grid": grid,
         "best": best,
+        "params": {
+            "fee_mode": fee_mode,
+            "cost_round_trip_pct": round(cost_r*100, 3),
+            "htf_filter": htf_filter,
+            "overrides": cfg_overrides or {},
+        },
         "caveat": ("추세 청산은 Guardian 구조 트레일링의 ATR×1.0 근사, "
                    "동시 TP/SL 터치는 SL 우선(보수적). 수수료 0.05%+슬리피지 0.02%/편도 반영."),
     }

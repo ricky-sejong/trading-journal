@@ -528,6 +528,22 @@ body{font-family:var(--sans);background:var(--bg);color:var(--text);min-height:1
         <input id="bt-fixed" value="5,10" style="width:60px;font-family:var(--mono);font-size:11px;background:var(--bg3);border:1px solid var(--border2);color:var(--text);padding:5px 6px;outline:none"></label>
       <button class="sm-btn" id="bt-run" onclick="runBacktest()" style="height:27px">RUN</button>
     </div>
+    <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;margin:-6px 0 14px 0;font-family:var(--mono);font-size:10px;color:var(--muted)">
+      <span style="color:var(--yellow)">실험:</span>
+      <label style="display:flex;align-items:center;gap:4px;cursor:pointer;padding-bottom:5px">
+        <input type="checkbox" id="bt-htf"> 1H 추세필터 (횡보신호 순방향만)</label>
+      <label style="display:flex;flex-direction:column;gap:3px">횡보 SL×ATR
+        <input id="bt-rsl" placeholder="1.0" style="width:45px;font-family:var(--mono);font-size:11px;background:var(--bg3);border:1px solid var(--border2);color:var(--text);padding:5px 6px;outline:none"></label>
+      <label style="display:flex;flex-direction:column;gap:3px">횡보 TP×ATR
+        <input id="bt-rtp" placeholder="2.0" style="width:45px;font-family:var(--mono);font-size:11px;background:var(--bg3);border:1px solid var(--border2);color:var(--text);padding:5px 6px;outline:none"></label>
+      <label style="display:flex;flex-direction:column;gap:3px">BBW 횡보문턱(%)
+        <input id="bt-bbw" placeholder="2.5" style="width:45px;font-family:var(--mono);font-size:11px;background:var(--bg3);border:1px solid var(--border2);color:var(--text);padding:5px 6px;outline:none"></label>
+      <label style="display:flex;flex-direction:column;gap:3px">수수료
+        <select id="bt-fee" style="font-family:var(--mono);font-size:11px;background:var(--bg3);border:1px solid var(--border2);color:var(--text);padding:5px 6px;outline:none">
+          <option value="taker">시장가 (0.05%)</option>
+          <option value="maker">지정가 (0.02%)</option>
+        </select></label>
+    </div>
 
     <div id="bt-progress" style="font-family:var(--mono);font-size:11px;color:var(--yellow);margin-bottom:12px;display:none"></div>
     <div class="metrics" id="bt-metrics"></div>
@@ -1597,7 +1613,12 @@ function runBacktest(){
     seed:parseFloat(document.getElementById('bt-seed').value)||100,
     leverages:document.getElementById('bt-levs').value,
     pcts:document.getElementById('bt-pcts').value,
-    fixed:document.getElementById('bt-fixed').value
+    fixed:document.getElementById('bt-fixed').value,
+    htf_filter:document.getElementById('bt-htf').checked,
+    range_sl_atr:document.getElementById('bt-rsl').value,
+    range_tp_atr:document.getElementById('bt-rtp').value,
+    bbw_range:document.getElementById('bt-bbw').value,
+    fee_mode:document.getElementById('bt-fee').value
   };
   document.getElementById('bt-run').disabled=true;
   fetch(SERVER+'/api/backtest/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
@@ -1637,6 +1658,16 @@ function pollBacktest(once){
 
 function renderBacktest(res){
   var s=res.summary;
+  var p=res.params||{};
+  var condParts=[];
+  if(p.htf_filter)condParts.push('1H필터 ON');
+  var ov=p.overrides||{};
+  if(ov.range_sl_atr)condParts.push('횡보SL×'+ov.range_sl_atr);
+  if(ov.range_tp_atr)condParts.push('횡보TP×'+ov.range_tp_atr);
+  if(ov.bbw_range_thresh)condParts.push('BBW<'+(ov.bbw_range_thresh*100).toFixed(1)+'%');
+  condParts.push(p.fee_mode==='maker'?'지정가 수수료':'시장가 수수료');
+  condParts.push('왕복비용 '+p.cost_round_trip_pct+'%');
+  document.getElementById('bt-sub').textContent='실험조건: '+condParts.join(' · ');
   document.getElementById('bt-metrics').innerHTML=
     '<div class="metric"><div class="m-label">TRADES</div><div class="m-val">'+s.trades+'</div></div>'+
     '<div class="metric"><div class="m-label">WIN RATE</div><div class="m-val">'+(s.win_rate!==null?s.win_rate+'%':'—')+'</div></div>'+

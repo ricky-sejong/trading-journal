@@ -1693,7 +1693,10 @@ def _run_backtest_thread(params):
             symbols, days=days, seed=params["seed"],
             leverages=params["leverages"], pcts=params["pcts"],
             fixed=params["fixed"], max_positions=params["max_positions"],
-            candle_data=candle_data, progress=prog)
+            candle_data=candle_data, progress=prog,
+            fee_mode=params.get("fee_mode", "taker"),
+            htf_filter=params.get("htf_filter", False),
+            cfg_overrides=params.get("cfg_overrides") or None)
         _backtest_state["result"] = result
         _backtest_state["error"] = None
         print(f"[backtest] 완료: {result['summary']['trades']}건, 그리드 {len(result['grid'])}행")
@@ -1720,7 +1723,15 @@ def backtest_run():
             "pcts": [float(x) for x in str(body.get("pcts", "5,10,15,25")).split(",")],
             "fixed": [float(x) for x in str(body.get("fixed", "5,10")).split(",")],
             "max_positions": int(body.get("max_positions", 2)),
+            "fee_mode": body.get("fee_mode", "taker"),
+            "htf_filter": bool(body.get("htf_filter", False)),
+            "cfg_overrides": {},
         }
+        # 전략 파라미터 오버라이드 (빈 값은 라이브 기본값 사용)
+        ov = params["cfg_overrides"]
+        if body.get("range_sl_atr"):  ov["range_sl_atr"]  = float(body["range_sl_atr"])
+        if body.get("range_tp_atr"):  ov["range_tp_atr"]  = float(body["range_tp_atr"])
+        if body.get("bbw_range"):     ov["bbw_range_thresh"] = float(body["bbw_range"]) / 100.0
         if len(params["symbols"]) > 6:
             return jsonify({'ok': False, 'msg': '심볼은 최대 6개까지 가능합니다.'})
         _backtest_state = {"running": True, "progress": {"stage": "start"},
