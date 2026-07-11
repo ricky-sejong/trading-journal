@@ -16,6 +16,15 @@ import psycopg2, psycopg2.extras
 from apscheduler.schedulers.background import BackgroundScheduler
 import notify as tg_notify
 
+# ── 모듈 선적재 ──────────────────────────────────────────
+# 봇 스레드들과 백테스트 스레드가 각자 import를 시작하면, Render 콜드스타트 직후처럼
+# 여러 스레드가 동시에 같은 모듈을 import하는 순간이 생기고, 파이썬이 교착 회피를 위해
+# 미완성 모듈을 넘겨주면서 "partially initialized module" 오류가 난다.
+# 메인 스레드에서 미리 전부 적재해두면 이후 스레드들의 import는 캐시 조회가 된다.
+import entry_bot as _preload_entry_bot            # noqa: F401
+import position_guardian as _preload_guardian     # noqa: F401
+import backtest as _preload_backtest              # noqa: F401
+
 # stdout 버퍼링 비활성화 — Render 로그에 print()가 즉시 안 뜨는 문제 방지
 sys.stdout.reconfigure(line_buffering=True)
 sys.stderr.reconfigure(line_buffering=True)
@@ -1719,9 +1728,9 @@ def backtest_run():
                         "BTC-USDT-SWAP,ETH-USDT-SWAP,SOL-USDT-SWAP").split(",") if s.strip()],
             "days": min(int(body.get("days", 90)), 180),
             "seed": float(body.get("seed", 100)),
-            "leverages": [int(x) for x in str(body.get("leverages", "5,10,15,25,40")).split(",")],
-            "pcts": [float(x) for x in str(body.get("pcts", "5,10,15,25")).split(",")],
-            "fixed": [float(x) for x in str(body.get("fixed", "5,10")).split(",")],
+            "leverages": [int(x) for x in str(body.get("leverages") or "5,10,15,25,40").split(",") if x.strip()],
+            "pcts": [float(x) for x in str(body.get("pcts") or "").split(",") if x.strip()],
+            "fixed": [float(x) for x in str(body.get("fixed") or "").split(",") if x.strip()],
             "max_positions": int(body.get("max_positions", 2)),
             "fee_mode": body.get("fee_mode", "taker"),
             "htf_filter": bool(body.get("htf_filter", False)),
@@ -1734,6 +1743,10 @@ def backtest_run():
         if body.get("bbw_range"):     ov["bbw_range_thresh"] = float(body["bbw_range"]) / 100.0
         if len(params["symbols"]) > 6:
             return jsonify({'ok': False, 'msg': '심볼은 최대 6개까지 가능합니다.'})
+        if not params["leverages"]:
+            return jsonify({'ok': False, 'msg': '레버리지를 최소 1개 입력하세요.'})
+        if not params["pcts"] and not params["fixed"]:
+            return jsonify({'ok': False, 'msg': '복리 % 또는 고정 USDT 중 최소 1개는 입력하세요.'})
         _backtest_state = {"running": True, "progress": {"stage": "start"},
                            "result": None, "error": None,
                            "started_at": datetime.datetime.now(tz=KST).strftime('%H:%M:%S')}
