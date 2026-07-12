@@ -538,6 +538,8 @@ body{font-family:var(--sans);background:var(--bg);color:var(--text);min-height:1
         <input id="bt-rtp" placeholder="2.0" style="width:45px;font-family:var(--mono);font-size:11px;background:var(--bg3);border:1px solid var(--border2);color:var(--text);padding:5px 6px;outline:none"></label>
       <label style="display:flex;flex-direction:column;gap:3px">BBW 횡보문턱(%)
         <input id="bt-bbw" placeholder="2.5" style="width:45px;font-family:var(--mono);font-size:11px;background:var(--bg3);border:1px solid var(--border2);color:var(--text);padding:5px 6px;outline:none"></label>
+      <label style="display:flex;flex-direction:column;gap:3px">EMA 기간
+        <input id="bt-ema" placeholder="50" style="width:45px;font-family:var(--mono);font-size:11px;background:var(--bg3);border:1px solid var(--border2);color:var(--text);padding:5px 6px;outline:none"></label>
       <label style="display:flex;flex-direction:column;gap:3px">수수료
         <select id="bt-fee" style="font-family:var(--mono);font-size:11px;background:var(--bg3);border:1px solid var(--border2);color:var(--text);padding:5px 6px;outline:none">
           <option value="taker">시장가 (0.05%)</option>
@@ -1618,6 +1620,7 @@ function runBacktest(){
     range_sl_atr:document.getElementById('bt-rsl').value,
     range_tp_atr:document.getElementById('bt-rtp').value,
     bbw_range:document.getElementById('bt-bbw').value,
+    ema_period:document.getElementById('bt-ema').value,
     fee_mode:document.getElementById('bt-fee').value
   };
   document.getElementById('bt-run').disabled=true;
@@ -1665,6 +1668,7 @@ function renderBacktest(res){
   if(ov.range_sl_atr)condParts.push('횡보SL×'+ov.range_sl_atr);
   if(ov.range_tp_atr)condParts.push('횡보TP×'+ov.range_tp_atr);
   if(ov.bbw_range_thresh)condParts.push('BBW<'+(ov.bbw_range_thresh*100).toFixed(1)+'%');
+  if(ov.ema_period)condParts.push('EMA'+ov.ema_period);
   condParts.push(p.fee_mode==='maker'?'지정가 수수료':'시장가 수수료');
   condParts.push('왕복비용 '+p.cost_round_trip_pct+'%');
   document.getElementById('bt-sub').textContent='실험조건: '+condParts.join(' · ');

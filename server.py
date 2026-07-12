@@ -1741,6 +1741,7 @@ def backtest_run():
         if body.get("range_sl_atr"):  ov["range_sl_atr"]  = float(body["range_sl_atr"])
         if body.get("range_tp_atr"):  ov["range_tp_atr"]  = float(body["range_tp_atr"])
         if body.get("bbw_range"):     ov["bbw_range_thresh"] = float(body["bbw_range"]) / 100.0
+        if body.get("ema_period"):    ov["ema_period"] = int(float(body["ema_period"]))
         if len(params["symbols"]) > 6:
             return jsonify({'ok': False, 'msg': '심볼은 최대 6개까지 가능합니다.'})
         if not params["leverages"]:
