@@ -70,13 +70,20 @@ DEFAULT_CONFIG = {
     "leverage":         int(os.environ.get("ENTRY_BOT_LEVERAGE", "25")),
     "margin_ratio":     float(os.environ.get("ENTRY_BOT_MARGIN_RATIO", "0.30")),
     # 전 심볼 합산 동시 포지션 한도 (심볼당 아님)
-    "max_positions":    int(os.environ.get("ENTRY_BOT_MAX_POSITIONS", "2")),
+    "max_positions":    int(os.environ.get("ENTRY_BOT_MAX_POSITIONS", "1")),
     # 심볼 간 API 호출 간격 (rate limit 보호)
     "symbol_gap_sec":   0.25,
 
     # 캔들
-    "kline_interval":   "15m",
-    "kline_limit":      100,
+    "kline_interval":   "1H",
+    "kline_limit":      250,
+
+    # The live system starts with one low-turnover strategy only.  Range
+    # mean-reversion remains in the code for research but is not tradeable by
+    # default because its small targets are highly sensitive to costs.
+    "strategy_mode":     os.environ.get("ENTRY_BOT_STRATEGY_MODE", "trend_only"),
+    "trend_filter_bar":  "4H",
+    "trend_filter_ema":  50,
 
     # ── 국면 판단 (볼린저밴드폭) ──
     "bb_period":        20,
@@ -122,6 +129,11 @@ DEFAULT_CONFIG = {
     "sl_min_pct":       0.15,
     "sl_max_pct":       3.0,
 
+    # Risk is expressed as the loss at the initial stop, not as a margin size.
+    "risk_per_trade_pct": float(os.environ.get("ENTRY_BOT_RISK_PER_TRADE_PCT", "0.5")),
+    "max_total_risk_pct": float(os.environ.get("ENTRY_BOT_MAX_TOTAL_RISK_PCT", "1.0")),
+    "max_margin_utilization": float(os.environ.get("ENTRY_BOT_MAX_MARGIN_UTILIZATION", "0.25")),
+
     # 공통
     "poll_interval_sec": 15,
     "dry_run":           os.environ.get("ENTRY_BOT_DRY_RUN", "true").lower() != "false",
@@ -162,7 +174,7 @@ entry_bot_running  = False    # 기본값: 꺼짐 — 웹사이트에서 켜야 
 entry_bot_instance = None
 
 # ─── DB 직접 조회 (웹사이트 설정을 실시간 반영, 프로세스 간 상태 불일치 방지) ──
-_bot_config_cache = {"data": {"running": False, "usdt_amount": 50.0, "leverage": 25, "entry_pct": 0.0}, "ts": 0}
+_bot_config_cache = {"data": {"running": False, "leverage": 25, "risk_per_trade_pct": 0.5}, "ts": 0}
 _BOT_CONFIG_CACHE_SEC = 5
 
 def _get_db_connection():
@@ -170,8 +182,7 @@ def _get_db_connection():
 
 def get_entry_bot_config():
     """
-    웹사이트에서 설정한 봇 ON/OFF, 진입 금액(USDT), 레버리지를 DB에서 직접 조회 (5초 캐싱).
-    settings 테이블 키: 'entry_bot_running', 'entry_bot_usdt_amount', 'entry_bot_leverage'
+    웹사이트에서 설정한 봇 ON/OFF, 레버리지, 초기 손절 기준 위험률을 DB에서 조회한다.
     """
     now = time.time()
     if now - _bot_config_cache["ts"] < _BOT_CONFIG_CACHE_SEC:
@@ -184,16 +195,15 @@ def get_entry_bot_config():
     try:
         with conn:
             with conn.cursor() as cur:
-                cur.execute("SELECT key, value FROM settings WHERE key IN (%s, %s, %s, %s)",
-                           ("entry_bot_running", "entry_bot_usdt_amount",
-                            "entry_bot_leverage", "entry_bot_entry_pct"))
+                cur.execute("SELECT key, value FROM settings WHERE key IN (%s, %s, %s)",
+                           ("entry_bot_running", "entry_bot_leverage",
+                            "entry_bot_risk_per_trade_pct"))
                 rows = dict(cur.fetchall())
         result = {
             "running":     rows.get("entry_bot_running", "false") == "true",
-            "usdt_amount": float(rows.get("entry_bot_usdt_amount", 50.0)),
             "leverage":    int(float(rows.get("entry_bot_leverage", 25))),
-            # entry_pct > 0 → 복리 모드 (진입 시점 시드의 %), 0 → 고정 USDT 모드
-            "entry_pct":   float(rows.get("entry_bot_entry_pct", 0.0) or 0.0),
+            "risk_per_trade_pct": float(rows.get(
+                "entry_bot_risk_per_trade_pct", DEFAULT_CONFIG["risk_per_trade_pct"])),
         }
         _bot_config_cache["data"] = result
         _bot_config_cache["ts"] = now
@@ -339,11 +349,16 @@ class EntryBot:
             log.info(f"[DRY-RUN] [{sym}] 레버리지 {leverage}x 설정 생략")
             self._last_leverage[sym] = leverage
             return
+        applied = True
         for ps in ["long", "short"]:
             res = self.client.set_leverage(sym, leverage, self.cfg["td_mode"], ps)
             if res.get("code") == "0":
                 log.info(f"[{sym}] 레버리지 {leverage}x ({ps}) 설정 완료")
-        self._last_leverage[sym] = leverage
+            else:
+                applied = False
+                log.warning(f"[{sym}] 레버리지 {leverage}x ({ps}) 설정 실패: {res.get('msg')}")
+        if applied:
+            self._last_leverage[sym] = leverage
 
     def _fetch_candles(self, sym):
         raw = self.client.get_klines(
@@ -359,6 +374,17 @@ class EntryBot:
         # confirm: '0'=진행 중 캔들, '1'=마감 (필드 없으면 마감 취급)
         last_confirmed = not (len(raw[-1]) > 8 and raw[-1][8] == "0")
         return closes, highs, lows, volumes, last_confirmed
+
+    def _htf_direction(self, sym):
+        """Return the confirmed 4H EMA trend used to gate 1H breakouts."""
+        raw = self.client.get_klines(sym, self.cfg["trend_filter_bar"], 250)
+        if raw and len(raw[-1]) > 8 and raw[-1][8] == "0":
+            raw = raw[:-1]
+        closes = [float(c[4]) for c in raw]
+        ema = calc_ema(closes, self.cfg["trend_filter_ema"])
+        if not closes or ema[-1] is None:
+            return None
+        return "long" if closes[-1] > ema[-1] else "short"
 
     def _detect_market_phase(self, closes):
         bb_u, bb_m, bb_l = calc_bollinger(closes, self.cfg["bb_period"], self.cfg["bb_std"])
@@ -402,49 +428,33 @@ class EntryBot:
             "ema50": round(ema50[-1], 2) if ema50[-1] else None,
         }
 
-    def _calc_margin(self, bot_cfg):
-        """
-        이번 진입에 쓸 마진(USDT) 계산.
-        - 복리 모드 (entry_pct > 0): 진입 시점 시드(cashBal, 미실현 제외) × pct%.
-          시드가 커지면 진입 금액도 커진다. 가용잔고의 95%를 넘지 않게 캡.
-        - 고정 모드 (entry_pct = 0): 기존 동작 — usdt_amount / max_positions.
-        반환: (margin, mode_str, seed or None) / 실패 시 (None, mode_str, None)
-        """
-        pct = bot_cfg.get("entry_pct", 0.0)
-        if pct > 0:
-            seed, avail = self.client.get_balance_detail("USDT")   # seed = cashBal (미실현 제외)
-            if seed <= 0:
-                log.warning(f"시드 조회 실패 (cashBal={seed}) — 진입 생략")
-                return None, "percent", None
-            margin = seed * pct / 100.0
-            cap = avail * 0.95
-            if margin > cap:
-                log.info(f"  마진 캡 적용: 시드 {seed:.2f}×{pct}% = {margin:.2f} → 가용 {avail:.2f}의 95% = {cap:.2f}")
-                margin = cap
-            if margin <= 0:
-                log.warning("가용잔고 부족 — 진입 생략")
-                return None, "percent", seed
-            return margin, "percent", seed
-        return bot_cfg["usdt_amount"] / max(1, self.cfg["max_positions"]), "fixed", None
-
-    def _calc_size(self, sym, price, margin, leverage):
-        """
-        마진(USDT) + 레버리지 기준 진입 수량(계약 수) 계산.
-        심볼별 ctVal을 조회해 정확한 계약 수를 산출. 스펙 조회 실패 시 None(진입 차단).
-        """
+    def _calc_risk_size(self, sym, price, sl_price, leverage, risk_pct):
+        """Size a position from the loss at its initial stop and available margin."""
         spec = self._get_instrument_spec(sym)
         if spec is None:
             return None
-        notional = margin * leverage
-        raw_sz = notional / (price * spec["ctVal"])
-        # lotSz 단위로 내림
-        lot = spec["lotSz"]
-        sz = math.floor(raw_sz / lot) * lot
-        if sz < spec["minSz"]:
-            log.warning(f"[{sym}] 계산 수량 {sz} < 최소 {spec['minSz']} — 진입 금액 부족")
+        try:
+            stop = float(sl_price)
+        except (TypeError, ValueError):
             return None
-        # lotSz가 정수면 정수 표기 (OKX는 문자열 수량)
-        return f"{int(sz)}" if lot >= 1 else f"{sz}"
+        loss_per_contract = abs(price - stop) * spec["ctVal"]
+        seed, avail = self.client.get_balance_detail("USDT")
+        risk_budget = seed * risk_pct / 100.0
+        if loss_per_contract <= 0 or risk_budget <= 0 or avail <= 0:
+            return None
+        raw_by_risk = risk_budget / loss_per_contract
+        raw_by_margin = (avail * self.cfg["max_margin_utilization"] * leverage /
+                         (price * spec["ctVal"]))
+        lot = spec["lotSz"]
+        sz = math.floor(min(raw_by_risk, raw_by_margin) / lot) * lot
+        if sz < spec["minSz"]:
+            log.warning(f"[{sym}] 위험 기준 수량 {sz} < 최소 {spec['minSz']} — 잔고 또는 손절폭 확인")
+            return None
+        notional = sz * price * spec["ctVal"]
+        margin = notional / leverage
+        actual_risk = sz * loss_per_contract
+        size = f"{int(sz)}" if lot >= 1 else f"{sz}"
+        return size, margin, actual_risk, seed
 
     def _tp_sl_atr(self, sym, signal, price, atr, is_trend):
         """
@@ -581,7 +591,17 @@ class EntryBot:
         atr_pct = round(atr / price * 100, 3) if atr else None
 
         signal = None
-        if phase == "trend":
+        htf_direction = self._htf_direction(sym)
+        if self.cfg["strategy_mode"] == "trend_only":
+            strategy_used = "4H EMA + 1H 돈치안 브레이크아웃"
+            if last_confirmed:
+                signal = self._trend_signal(closes, highs, lows)
+                if signal and signal != htf_direction:
+                    log.info(f"[{sym}] 4H 추세({htf_direction})와 반대 신호({signal}) — 진입 생략")
+                    signal = None
+            else:
+                strategy_used += " (1H 마감 대기)"
+        elif phase == "trend":
             signal = self._trend_signal(closes, highs, lows)
             strategy_used = "돈치안 브레이크아웃"
         elif phase == "range":
@@ -603,6 +623,7 @@ class EntryBot:
                  f"| DC고: {indicators['dc_h']} | 전략: {strategy_used} | 신호: {signal}")
 
         open_pos = []
+        entered = False
         try:
             raw = self.client.get_positions(sym)
             open_pos = [p for p in raw if float(p.get("pos", 0) or 0) != 0]
@@ -628,7 +649,7 @@ class EntryBot:
             "bbw": round(bbw*100, 3) if bbw else None,
             "atr": round(atr, 6) if atr else None, "atr_pct": atr_pct,
             "signal": signal, "strategy": strategy_used,
-            "symbol": sym, "leverage": bot_cfg["leverage"],
+            "symbol": sym, "leverage": bot_cfg["leverage"], "htf_direction": htf_direction,
             **indicators,
         }
         ss["latest"] = sym_latest
@@ -643,6 +664,8 @@ class EntryBot:
             elif total_open_count >= self.cfg["max_positions"]:
                 log.info(f"  ⛔ [{sym}] 신호 {signal} 발생했으나 합산 포지션 한도 "
                          f"({total_open_count}/{self.cfg['max_positions']}) 도달 — 진입 생략")
+            elif (total_open_count + 1) * bot_cfg["risk_per_trade_pct"] > self.cfg["max_total_risk_pct"]:
+                log.info(f"  ⛔ [{sym}] 총 위험 한도 {self.cfg['max_total_risk_pct']}% 초과 예상 — 진입 생략")
             elif open_pos:
                 log.info(f"  ⛔ [{sym}] 신호 {signal} 발생했으나 이미 이 심볼 포지션 보유 — 진입 생략")
             else:
@@ -651,10 +674,7 @@ class EntryBot:
                 side_okx, pos_side_okx = signal_to_okx(signal)
                 dir_icon   = "🟢 롱" if signal == "long" else "🔴 숏"
                 trail_note = " (청산관리: Guardian)" if is_trend else " (진입 SL/TP 고정)"
-                if bot_cfg.get("entry_pct", 0) > 0:
-                    size_desc = f"시드의 {bot_cfg['entry_pct']}% (복리)"
-                else:
-                    size_desc = f"{bot_cfg['usdt_amount']}USDT/{self.cfg['max_positions']}분할"
+                size_desc = f"초기 SL 기준 계좌 {bot_cfg['risk_per_trade_pct']}% 위험"
                 log.info(f"  → {dir_icon} [{sym}] 진입! "
                          f"마진:{size_desc}"
                          f"×{bot_cfg['leverage']}x | TP: {tp_price} ({tp_pct}%) "
@@ -680,7 +700,7 @@ class EntryBot:
                     "volume_ratio": vol_ratio,
                     "hour_kst": datetime.datetime.now().hour,
                     "leverage": bot_cfg["leverage"],
-                    "usdt_amount": bot_cfg["usdt_amount"],
+                    "risk_per_trade_pct": bot_cfg["risk_per_trade_pct"],
                     "interval": self.cfg["kline_interval"],
                     "entry_mode": ("confirm_close" if (phase == "range" and self.cfg.get("range_confirm_close"))
                                    else "intrabar"),
@@ -692,23 +712,22 @@ class EntryBot:
                 ord_id = None
                 signal_result = None   # 주문 실패 시 'order_failed'로 즉시 확정
                 if not self.dry:
-                    margin, size_mode, equity = self._calc_margin(bot_cfg)
-                    signal_meta["size_mode"] = size_mode
-                    if size_mode == "percent":
-                        signal_meta["entry_pct"] = bot_cfg.get("entry_pct")
-                        signal_meta["equity"] = round(equity, 2) if equity else None
-                    if margin is not None:
-                        signal_meta["margin"] = round(margin, 2)
-                    size = self._calc_size(sym, price, margin, bot_cfg["leverage"]) if margin is not None else None
-                    if size is None:
+                    sized = self._calc_risk_size(sym, price, sl_price, bot_cfg["leverage"],
+                                                  bot_cfg["risk_per_trade_pct"])
+                    if sized is None:
                         # 조기 return하면 신호 기록·last_signal 갱신을 건너뛰어
                         # 매 루프 같은 신호로 재시도(로그 스팸)하게 되므로 실패로 기록하고 계속 진행
                         log.warning(f"[{sym}] 수량 계산 실패 — result='order_failed'로 기록")
                         signal_meta["order_failed"] = True
-                        signal_meta["fail_msg"] = "수량 계산 실패 (진입 금액 부족 또는 계약 스펙 조회 실패)"
+                        signal_meta["fail_msg"] = "위험 기준 수량 계산 실패 (잔고·손절폭·계약 스펙 확인)"
                         signal_result = "order_failed"
                         notify.notify_order_failed(sym, signal, signal_meta["fail_msg"])
                     else:
+                        size, margin, actual_risk, equity = sized
+                        signal_meta.update({"size_mode": "initial_stop_risk",
+                                            "margin": round(margin, 2),
+                                            "risk_usdt": round(actual_risk, 2),
+                                            "equity": round(equity, 2)})
                         signal_meta["size"] = size
                         res = self.client.place_order(
                             sym, self.cfg["td_mode"],
@@ -719,10 +738,13 @@ class EntryBot:
                             ord_id = res.get("data", [{}])[0].get("ordId")
                         except Exception:
                             ord_id = None
-                        if res.get("code") != "0":
+                        item = (res.get("data") or [{}])[0]
+                        order_ok = (res.get("code") == "0" and
+                                    item.get("sCode", "0") == "0" and bool(ord_id))
+                        if not order_ok:
                             log.warning(f"[{sym}] 주문 실패 — result='order_failed'로 기록")
                             signal_meta["order_failed"] = True
-                            signal_meta["fail_msg"] = str(res.get("msg", ""))[:200]
+                            signal_meta["fail_msg"] = str(item.get("sMsg") or res.get("msg", "주문 ID 없음"))[:200]
                             try:
                                 signal_meta["fail_detail"] = str(res.get("data", [{}])[0].get("sMsg", ""))[:200]
                             except Exception:
@@ -731,6 +753,7 @@ class EntryBot:
                             notify.notify_order_failed(sym, signal,
                                 signal_meta.get("fail_detail") or signal_meta.get("fail_msg") or "unknown")
                         else:
+                            entered = True
                             notify.notify_entry(sym, signal, price, tp_price, sl_price,
                                                 strategy_used,
                                                 margin=signal_meta.get("margin"),
@@ -762,8 +785,14 @@ class EntryBot:
             if ss.get("last_signal") != signal:
                 save_last_signal_to_db(sym, signal)   # 재배포 대비 DB 영속화
             ss["last_signal"] = signal
+        elif ss.get("last_signal") is not None:
+            # A breakout/cross is an event, not a permanent directional lock.
+            # Reset after the signal disappears so a later independent breakout
+            # in the same direction can be considered.
+            save_last_signal_to_db(sym, "")
+            ss["last_signal"] = None
 
-        return open_pos
+        return open_pos, entered
 
     def run_once(self):
         global entry_bot_running
@@ -789,10 +818,12 @@ class EntryBot:
         collected = []
         for sym in self.cfg["symbols"]:
             try:
-                pos = self._process_symbol(sym, bot_cfg, total_open)
+                pos, entered = self._process_symbol(sym, bot_cfg, total_open)
                 collected.extend(pos)
-                # 이번 루프에서 새 진입이 있었으면 한도 카운트에 즉시 반영
-                total_open = max(total_open, len(collected))
+                # A newly accepted order consumes a slot immediately.  The
+                # exchange position may not be visible until the next poll.
+                if entered:
+                    total_open += 1
             except Exception as e:
                 log.error(f"[{sym}] 처리 오류: {e}", exc_info=True)
             time.sleep(self.cfg["symbol_gap_sec"])

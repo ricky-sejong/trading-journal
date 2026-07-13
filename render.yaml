@@ -13,3 +13,5 @@ services:
         sync: false
       - key: OKX_PASSPHRASE
         sync: false
+      - key: API_ADMIN_TOKEN
+        generateValue: true

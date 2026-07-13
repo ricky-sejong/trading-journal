@@ -37,7 +37,7 @@ def cost_round_trip(fee_mode="taker"):
 
 
 # ─── 데이터 수집 (OKX 공개 API, 키 불필요) ─────────────────
-def fetch_history(inst_id, bar="15m", days=90):
+def fetch_history(inst_id, bar="1H", days=90):
     """history-candles를 after 커서로 페이지네이션. 과거→현재 정렬 반환."""
     need_ms = days * 86400 * 1000
     start_ms = int(time.time() * 1000) - need_ms
@@ -95,11 +95,13 @@ def make_signal_bot(overrides=None):
     return bot
 
 
-def simulate_symbol(bot, sym, candles, warmup=100, cost_r=None, htf_filter=False):
+def simulate_symbol(bot, sym, candles, warmup=200, cost_r=None, htf_filter=False,
+                    funding_rate_8h=0.0001):
     """
     한 심볼의 트레이드 리스트 생성.
     반환 트레이드: {entry_ts, exit_ts, side, entry, exit, r(비용차감 가격수익률),
-                   sl_pct, strategy, exit_kind}
+                   sl_pct, strategy, exit_kind}.  Funding is charged by holding
+                   time using the supplied conservative per-8-hour estimate.
     """
     closes  = [float(c[4]) for c in candles]
     highs   = [float(c[2]) for c in candles]
@@ -134,7 +136,9 @@ def simulate_symbol(bot, sym, candles, warmup=100, cost_r=None, htf_filter=False
             if exit_px is not None:
                 def _r(px):
                     raw = (px - pos["entry"]) / pos["entry"]
-                    return (-raw if pos["side"] == "short" else raw) - COST_R
+                    hold_8h = max(0, ts[i] - pos["t0"]) / (8 * 3600 * 1000)
+                    funding = hold_8h * funding_rate_8h
+                    return (-raw if pos["side"] == "short" else raw) - COST_R - funding
                 trades.append({
                     "entry_ts": pos["t0"], "exit_ts": ts[i],
                     "side": pos["side"], "entry": pos["entry"], "exit": exit_px,
@@ -143,6 +147,8 @@ def simulate_symbol(bot, sym, candles, warmup=100, cost_r=None, htf_filter=False
                     "ambiguous": ambiguous,
                     # 동시 터치 시 'TP가 먼저였다면'의 수익률 (민감도 상한 계산용)
                     "r_tp_first": _r(pos["tp"]) if ambiguous else None,
+                    "mae_r": pos["mae_r"] - COST_R,
+                    "mae_ts": pos["mae_ts"],
                 })
                 pos = None
             else:
@@ -157,6 +163,10 @@ def simulate_symbol(bot, sym, candles, warmup=100, cost_r=None, htf_filter=False
                         else:
                             pos["trail_ext"] = min(pos["trail_ext"], l)
                             pos["sl"] = min(pos["sl"], pos["trail_ext"] + dist)
+                adverse = ((l - pos["entry"]) / pos["entry"] if pos["side"] == "long"
+                           else (pos["entry"] - h) / pos["entry"])
+                if adverse < pos["mae_r"]:
+                    pos["mae_r"], pos["mae_ts"] = adverse, ts[i]
             if pos:
                 continue   # 보유 중엔 신규 신호 안 봄 (라이브와 동일)
 
@@ -168,7 +178,11 @@ def simulate_symbol(bot, sym, candles, warmup=100, cost_r=None, htf_filter=False
         window_h = highs[i+1-w:i+1]
         window_l = lows[i+1-w:i+1]
         phase, bbw = bot._detect_market_phase(window_c)
-        if phase == "trend":
+        if bot.cfg.get("strategy_mode") == "trend_only":
+            signal = bot._trend_signal(window_c, window_h, window_l)
+            strategy = "4h_ema_1h_donchian"
+            phase = "trend"
+        elif phase == "trend":
             signal = bot._trend_signal(window_c, window_h, window_l)
             strategy = "donchian_breakout"
         elif phase == "range":
@@ -178,8 +192,8 @@ def simulate_symbol(bot, sym, candles, warmup=100, cost_r=None, htf_filter=False
             signal = None
             strategy = None
 
-        # HTF 필터: 횡보 신호는 상위 추세와 순방향만 허용
-        if signal and htf_filter and strategy == "stochrsi_ema50":
+        # HTF filter: only trade in the direction of the 4H EMA50 proxy.
+        if signal and htf_filter:
             e = ema_htf[i]
             if e is None:
                 signal = None            # EMA200 워밍업 전 — 판정 보류
@@ -205,13 +219,13 @@ def simulate_symbol(bot, sym, candles, warmup=100, cost_r=None, htf_filter=False
             "side": signal, "entry": entry,
             "tp": float(tp_s), "sl": float(sl_s), "sl_pct": sl_pct,
             "strategy": strategy, "is_trend": is_trend,
-            "t0": ts[i], "trail_ext": entry,
+            "t0": ts[i], "trail_ext": entry, "mae_r": 0.0, "mae_ts": ts[i],
         }
     return trades
 
 
 # ─── 사이징/레버리지 그리드 ────────────────────────────────
-def run_account(trades, seed, leverage, mode, param, max_positions=2):
+def run_account(trades, seed, leverage, mode, param, max_positions=1):
     """
     시간순 트레이드 스트림에 계좌 시뮬레이션.
     mode='fixed'  : param = 진입 마진 USDT 고정
@@ -222,11 +236,13 @@ def run_account(trades, seed, leverage, mode, param, max_positions=2):
     events = []
     for t in trades:
         events.append((t["entry_ts"], 0, "open", t))
-        events.append((t["exit_ts"], 1, "close", t))
+        events.append((t.get("mae_ts", t["entry_ts"]), 1, "mark", t))
+        events.append((t["exit_ts"], 2, "close", t))
     events.sort(key=lambda e: (e[0], e[1]))
 
     equity = seed
     open_pos = {}          # id(trade) → margin
+    marked_r = {}
     peak, mdd = seed, 0.0
     taken = skipped = wipes = 0
     curve = []
@@ -244,9 +260,18 @@ def run_account(trades, seed, leverage, mode, param, max_positions=2):
                 skipped += 1
                 continue
             open_pos[id(t)] = margin
+            marked_r[id(t)] = 0.0
             taken += 1
+        elif kind == "mark":
+            if id(t) in open_pos:
+                marked_r[id(t)] = min(marked_r[id(t)], t.get("mae_r", 0.0))
+                marked_equity = equity + sum(open_pos[k] * leverage * marked_r.get(k, 0.0)
+                                             for k in open_pos)
+                if peak > 0:
+                    mdd = max(mdd, (peak - max(0.0, marked_equity)) / peak * 100)
         else:
             margin = open_pos.pop(id(t), None)
+            marked_r.pop(id(t), None)
             if margin is None:
                 continue
             lev_r = leverage * t["r"]
@@ -310,10 +335,29 @@ def summarize_trades(trades):
         print(f"  {k}: {cnt}건, 승률 {w/cnt*100:.1f}%, 평균 r {rsum/cnt*100:.3f}%")
 
 
+def chronological_folds(trades, seed, leverage, mode, param, max_positions, folds=3):
+    """Report untouched chronological slices; never choose parameters per slice."""
+    if not trades:
+        return []
+    ordered = sorted(trades, key=lambda t: t["entry_ts"])
+    first, last = ordered[0]["entry_ts"], ordered[-1]["entry_ts"]
+    width = max(1, (last - first) // folds)
+    rows = []
+    for i in range(folds):
+        lo = first + width * i
+        hi = last + 1 if i == folds - 1 else lo + width
+        chunk = [t for t in ordered if lo <= t["entry_ts"] < hi]
+        result = run_account(chunk, seed, leverage, mode, param, max_positions)
+        rows.append({"fold": i + 1, "trades": len(chunk), "ret_pct": result["ret_pct"],
+                     "mdd_pct": result["mdd_pct"], "final": result["final"]})
+    return rows
+
+
 def run_backtest(symbols, days=90, seed=100.0, leverages=(5,10,15,25,40),
-                 pcts=(5,10,15,25), fixed=(5,10), max_positions=2,
-                 bar="15m", progress=None, candle_data=None,
-                 fee_mode="taker", htf_filter=False, cfg_overrides=None):
+                 pcts=(0.25,0.5,0.75), fixed=(), max_positions=1,
+                 bar="1H", progress=None, candle_data=None,
+                 fee_mode="taker", htf_filter=True, cfg_overrides=None,
+                 funding_rate_8h=0.0001):
     """
     서버/코드에서 직접 호출하는 진입점. progress(dict) 콜백으로 진행 상황 보고.
     반환: {'summary': {...}, 'by_strategy': [...], 'grid': [...], 'best': {...}}
@@ -336,7 +380,8 @@ def run_backtest(symbols, days=90, seed=100.0, leverages=(5,10,15,25,40),
         if len(candle_data.get(sym, [])) < 200:
             continue
         all_trades.extend(simulate_symbol(bot, sym, candle_data[sym],
-                                          cost_r=cost_r, htf_filter=htf_filter))
+                                          cost_r=cost_r, htf_filter=htf_filter,
+                                          funding_rate_8h=funding_rate_8h))
     all_trades.sort(key=lambda t: t["entry_ts"])
 
     report(stage="grid", done=0, total=1)
@@ -373,6 +418,12 @@ def run_backtest(symbols, days=90, seed=100.0, leverages=(5,10,15,25,40),
             if best is None or row["final"] > best["final"]:
                 best = row
 
+    # A conservative fixed configuration is shown across chronological folds.
+    # It is intentionally not the in-sample "best" row.
+    wf_mode, wf_param = (("percent", min(pcts)) if pcts else ("fixed", min(fixed)))
+    walk_forward = chronological_folds(all_trades, seed, min(leverages), wf_mode,
+                                       wf_param, max_positions)
+
     return {
         "summary": {"trades": n,
                     "win_rate": round(wins/n*100, 1) if n else None,
@@ -390,13 +441,18 @@ def run_backtest(symbols, days=90, seed=100.0, leverages=(5,10,15,25,40),
         "by_strategy": strategy_rows,
         "grid": grid,
         "best": best,
+        "walk_forward": {"mode": wf_mode, "param": wf_param,
+                         "leverage": min(leverages), "folds": walk_forward,
+                         "note": "동일한 보수 설정을 시간 순서 3구간에 고정 적용. 구간별 일관성을 확인하며 최적 행을 선택하지 않음."},
         "params": {
             "fee_mode": fee_mode,
             "cost_round_trip_pct": round(cost_r*100, 3),
+            "funding_rate_8h_pct": round(funding_rate_8h*100, 4),
             "htf_filter": htf_filter,
             "overrides": cfg_overrides or {},
         },
-        "caveat": ("추세 청산은 Guardian 구조 트레일링의 ATR×1.0 근사, "
+        "caveat": ("MDD는 각 거래의 캔들 내 MAE를 반영한 근사치이며, "
+                   "추세 청산은 Guardian 구조 트레일링의 ATR×1.0 근사, "
                    "동시 TP/SL 터치는 SL 우선(보수적). 수수료 0.05%+슬리피지 0.02%/편도 반영."),
     }
 
@@ -405,12 +461,12 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--symbols", default="BTC-USDT-SWAP,ETH-USDT-SWAP,SOL-USDT-SWAP")
     ap.add_argument("--days", type=int, default=90)
-    ap.add_argument("--bar", default="15m")
+    ap.add_argument("--bar", default="1H")
     ap.add_argument("--seed", type=float, default=100.0)
     ap.add_argument("--leverages", default="5,10,15,25,40")
     ap.add_argument("--pcts", default="5,10,15,25")
     ap.add_argument("--fixed", default="5,10")
-    ap.add_argument("--max-positions", type=int, default=2)
+    ap.add_argument("--max-positions", type=int, default=1)
     ap.add_argument("--cache", default="")
     args = ap.parse_args()
 

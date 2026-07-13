@@ -61,6 +61,9 @@ CREATE TABLE IF NOT EXISTS journal (
 | `OKX_API_KEY` | OKX API Key |
 | `OKX_SECRET_KEY` | OKX Secret Key |
 | `OKX_PASSPHRASE` | OKX Passphrase |
+| `API_ADMIN_TOKEN` | Render가 생성한 대시보드 관리자 토큰. 첫 접속 시 브라우저에 입력 |
+| `ENTRY_BOT_RISK_PER_TRADE_PCT` | 초기 손절 기준 거래당 계좌 위험률. 기본 0.5, 최대 1.0 권장 |
+| `ENTRY_BOT_MAX_TOTAL_RISK_PCT` | 모든 봇 포지션 합산 위험률 상한. 기본 1.0 |
 
 5. **Deploy** 클릭 → 완료되면 URL 복사 (예: `https://trading-journal-xxxx.onrender.com`)
 
@@ -93,5 +96,12 @@ CREATE TABLE IF NOT EXISTS journal (
 
 ## OKX API 키 권한
 - ✅ Read (Account, Trade History)
-- ❌ Trade (불필요)
+- ✅ Trade (자동 진입/Guardian 청산을 사용할 때만 필요. 일지 전용이면 비활성화)
 - ❌ Withdraw (절대 금지)
+
+## 자동매매 기본 정책
+
+- 기본 전략은 **4시간 EMA 방향 + 1시간 돈치안 돌파**이며, 1시간 캔들이 마감된 뒤에만 진입합니다.
+- 진입 수량은 고정 마진이 아니라 초기 SL까지의 손실이 계좌의 설정 위험률을 넘지 않도록 계산합니다.
+- BTC·ETH·SOL은 상관성이 높으므로 기본 동시 포지션 한도는 1개입니다.
+- 백테스트는 1시간봉, 왕복 수수료·슬리피지·보수적 8시간 펀딩비 가정을 사용합니다. 실제 펀딩비와 체결 비용은 반드시 별도로 대조하세요.

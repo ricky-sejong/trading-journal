@@ -8,6 +8,7 @@ okx_client.py — EntryBot / Position Guardian 공용 OKX REST 클라이언트
 """
 
 import json, time, hmac, hashlib, base64, logging, datetime
+from decimal import Decimal, ROUND_HALF_UP
 import urllib.request, urllib.parse, urllib.error
 
 log = logging.getLogger("OKXClient")
@@ -118,10 +119,12 @@ class OKXClient:
         return spec["tickSz"] if spec else "0.0001"
 
     def fmt_px(self, inst_id, price):
-        """tickSz 소수 자릿수에 맞춰 가격 문자열 생성."""
-        tick = self.get_tick_size(inst_id)
-        decimals = len(tick.split(".")[1]) if "." in tick else 0
-        return f"{price:.{decimals}f}"
+        """Return a price that is an actual multiple of the instrument tick."""
+        tick = Decimal(self.get_tick_size(inst_id))
+        value = Decimal(str(price))
+        rounded = (value / tick).quantize(Decimal("1"), rounding=ROUND_HALF_UP) * tick
+        decimals = max(0, -tick.as_tuple().exponent)
+        return f"{rounded:.{decimals}f}"
 
     # ── 계좌 ────────────────────────────────────────────
     def get_balance(self, ccy="USDT"):
@@ -255,8 +258,10 @@ class OKXClient:
         return {"has_sl": has_sl, "has_tp": has_tp,
                 "sl_price": sl_price, "tp_price": tp_price, "algo_id": algo_id}
 
-    def get_all_algo_ids(self, inst_id):
+    def get_all_algo_ids(self, inst_id, pos_side=None):
         orders = self._get_pending_algos(inst_id)
+        if pos_side:
+            orders = [o for o in orders if o.get("posSide") in ("", pos_side)]
         log.info(f"orders-algo-pending 병합 조회: 건수={len(orders)}")
         ids = []
         for o in orders:
@@ -286,8 +291,11 @@ class OKXClient:
         return self._req("POST", "/api/v5/trade/cancel-algos", body=body)
 
     def set_tpsl(self, inst_id, pos_side, sl_price=None, tp_price=None, algo_id=None):
-        """TP/SL 설정. algo_id 있으면 amend, 실패 시 취소 후 재생성.
-        51088(포지션당 1개 제한) 시 심볼 전체 알고 취소 후 재시도."""
+        """TP/SL 설정. Guardian이 소유한 주문만 amend/cancel한다.
+
+        A 51088 response must not trigger a broad cancellation: an order on the
+        same instrument can belong to the user or to the opposite position.
+        """
         if algo_id:
             res = self.amend_tpsl(algo_id, inst_id, sl_price=sl_price, tp_price=tp_price)
             if res.get("code") == "0":
@@ -330,18 +338,8 @@ class OKXClient:
             except (IndexError, AttributeError, TypeError):
                 sub_err = None
             if sub_err == "51088":
-                log.warning("포지션당 TP/SL 1개 제한 — 심볼 전체 알고주문 조회 후 취소 재시도")
-                all_ids = self.get_all_algo_ids(inst_id)
-                if all_ids:
-                    log.warning(f"발견된 알고주문 {len(all_ids)}개 전부 취소: {all_ids}")
-                    for aid in all_ids:
-                        self.cancel_algo(inst_id, aid)
-                    time.sleep(0.3)
-                    res = self._req("POST", "/api/v5/trade/order-algo", body=body)
-                    if res.get("code") != "0":
-                        log.warning(f"재시도 후에도 실패: {res.get('msg')} | {json.dumps(res, ensure_ascii=False)}")
-                else:
-                    log.warning("취소할 알고주문을 찾지 못함 — OKX 응답 지연 가능성")
+                log.error("TP/SL 생성 거절(51088): 기존 주문을 자동 취소하지 않습니다. "
+                          "Guardian 소유 algoId를 확인하거나 수동으로 정리한 뒤 재시도하세요.")
         return res
 
     def close_position_market(self, inst_id, pos_side):

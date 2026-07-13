@@ -415,21 +415,17 @@ body{font-family:var(--sans);background:var(--bg);color:var(--text);min-height:1
       <span style="font-family:var(--mono);font-size:9px;color:var(--muted);margin-left:auto">포지션별 ON/OFF는 아래 테이블에서 설정</span>
     </div>
 
-    <!-- Entry Bot 제어 (신규 진입 봇 — ON/OFF + 진입 금액 설정) -->
+    <!-- Entry Bot 제어 (신규 진입 봇 — 초기 SL 기준 위험액 설정) -->
     <div style="background:var(--bg2);border:1px solid var(--border);border-radius:2px;padding:12px 16px;margin-bottom:16px;display:flex;align-items:center;gap:14px;flex-wrap:wrap">
       <div style="display:flex;align-items:center;gap:8px">
         <div class="conn-dot" id="entrybot-dot"></div>
         <span style="font-family:var(--mono);font-size:11px;color:var(--text2)" id="entrybot-status">ENTRY BOT 확인 중...</span>
       </div>
       <div style="display:flex;align-items:center;gap:6px;margin-left:auto;flex-wrap:wrap">
-        <span style="font-family:var(--mono);font-size:9px;color:var(--muted)">진입비율</span>
-        <input type="number" id="entrybot-pct" value="0" min="0" max="100" step="0.5" onchange="updateSizeModeHint()"
+        <span style="font-family:var(--mono);font-size:9px;color:var(--muted)">거래당 위험</span>
+        <input type="number" id="entrybot-risk" value="0.5" min="0.05" max="1" step="0.05"
                style="width:55px;font-family:var(--mono);font-size:11px;background:var(--bg3);border:1px solid var(--border2);color:var(--yellow);padding:4px 6px;outline:none">
         <span style="font-family:var(--mono);font-size:9px;color:var(--muted)">%</span>
-        <span style="font-family:var(--mono);font-size:9px;color:var(--muted);margin-left:6px">진입금액</span>
-        <input type="number" id="entrybot-amount" value="50" min="1" step="1"
-               style="width:70px;font-family:var(--mono);font-size:11px;background:var(--bg3);border:1px solid var(--border2);color:var(--text);padding:4px 6px;outline:none">
-        <span style="font-family:var(--mono);font-size:9px;color:var(--muted)">USDT</span>
         <span style="font-family:var(--mono);font-size:9px;color:var(--muted);margin-left:6px">배율</span>
         <input type="number" id="entrybot-leverage" value="25" min="1" max="125" step="1"
                style="width:55px;font-family:var(--mono);font-size:11px;background:var(--bg3);border:1px solid var(--border2);color:var(--text);padding:4px 6px;outline:none">
@@ -510,7 +506,7 @@ body{font-family:var(--sans);background:var(--bg);color:var(--text);min-height:1
   <div class="panel" id="p-backtest">
     <div class="panel-header">
       <span class="panel-title">BACKTEST</span>
-      <span class="panel-sub" id="bt-sub">사이징 × 레버리지 그리드 — 라이브와 동일한 신호 로직</span>
+      <span class="panel-sub" id="bt-sub">1H 추세추종 · 4H 방향필터 · 초기 손절 위험 기반 검증</span>
     </div>
 
     <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;margin-bottom:14px;font-family:var(--mono);font-size:10px;color:var(--muted)">
@@ -522,8 +518,8 @@ body{font-family:var(--sans);background:var(--bg);color:var(--text);min-height:1
         <input id="bt-seed" type="number" value="100" min="10" style="width:60px;font-family:var(--mono);font-size:11px;background:var(--bg3);border:1px solid var(--border2);color:var(--text);padding:5px 6px;outline:none"></label>
       <label style="display:flex;flex-direction:column;gap:3px">레버리지 목록
         <input id="bt-levs" value="5,10,15,25,40" style="width:100px;font-family:var(--mono);font-size:11px;background:var(--bg3);border:1px solid var(--border2);color:var(--text);padding:5px 6px;outline:none"></label>
-      <label style="display:flex;flex-direction:column;gap:3px">복리 %
-        <input id="bt-pcts" value="5,10,15,25" style="width:90px;font-family:var(--mono);font-size:11px;background:var(--bg3);border:1px solid var(--border2);color:var(--text);padding:5px 6px;outline:none"></label>
+      <label style="display:flex;flex-direction:column;gap:3px">위험 % 목록
+        <input id="bt-pcts" value="0.25,0.5,0.75" style="width:90px;font-family:var(--mono);font-size:11px;background:var(--bg3);border:1px solid var(--border2);color:var(--text);padding:5px 6px;outline:none"></label>
       <label style="display:flex;flex-direction:column;gap:3px">고정 USDT
         <input id="bt-fixed" value="5,10" style="width:60px;font-family:var(--mono);font-size:11px;background:var(--bg3);border:1px solid var(--border2);color:var(--text);padding:5px 6px;outline:none"></label>
       <button class="sm-btn" id="bt-run" onclick="runBacktest()" style="height:27px">RUN</button>
@@ -531,7 +527,7 @@ body{font-family:var(--sans);background:var(--bg);color:var(--text);min-height:1
     <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;margin:-6px 0 14px 0;font-family:var(--mono);font-size:10px;color:var(--muted)">
       <span style="color:var(--yellow)">실험:</span>
       <label style="display:flex;align-items:center;gap:4px;cursor:pointer;padding-bottom:5px">
-        <input type="checkbox" id="bt-htf"> 1H 추세필터 (횡보신호 순방향만)</label>
+        <input type="checkbox" id="bt-htf" checked disabled> 4H EMA 방향필터 (필수)</label>
       <label style="display:flex;flex-direction:column;gap:3px">횡보 SL×ATR
         <input id="bt-rsl" placeholder="1.0" style="width:45px;font-family:var(--mono);font-size:11px;background:var(--bg3);border:1px solid var(--border2);color:var(--text);padding:5px 6px;outline:none"></label>
       <label style="display:flex;flex-direction:column;gap:3px">횡보 TP×ATR
@@ -545,6 +541,8 @@ body{font-family:var(--sans);background:var(--bg);color:var(--text);min-height:1
           <option value="taker">시장가 (0.05%)</option>
           <option value="maker">지정가 (0.02%)</option>
         </select></label>
+      <label style="display:flex;flex-direction:column;gap:3px">8H 펀딩비(%)
+        <input id="bt-funding" value="0.01" min="0" step="0.005" style="width:55px;font-family:var(--mono);font-size:11px;background:var(--bg3);border:1px solid var(--border2);color:var(--text);padding:5px 6px;outline:none"></label>
     </div>
 
     <div id="bt-progress" style="font-family:var(--mono);font-size:11px;color:var(--yellow);margin-bottom:12px;display:none"></div>
@@ -664,7 +662,24 @@ body{font-family:var(--sans);background:var(--bg);color:var(--text);min-height:1
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
 <script>
-var SERVER='https://trading-journal-s09e.onrender.com';
+// Serve the UI from the same origin as Flask.  The admin token stays only in
+// this browser tab (sessionStorage), not in source code or persistent storage.
+var SERVER='';
+(function(){
+  var nativeFetch=window.fetch.bind(window);
+  window.fetch=function(input, init){
+    var token=sessionStorage.getItem('tradingJournalAdminToken');
+    if(!token){
+      token=window.prompt('관리자 API 토큰을 입력하세요.');
+      if(token)sessionStorage.setItem('tradingJournalAdminToken',token);
+    }
+    init=init||{};
+    var headers=new Headers(init.headers||{});
+    if(token)headers.set('X-Admin-Token',token);
+    init.headers=headers;
+    return nativeFetch(input,init);
+  };
+})();
 var ch=null,period='daily',calYear,calMonth,editingId=null;
 var journalData=[];
 var refreshTimers=[];  // 자동갱신 인터벌 ID 배열 (기존 2변수 방식은 4개 중 2개가 유실되는 누수 버그)
@@ -705,6 +720,12 @@ function group(data,kf,lf){
     var it=g.items,sO=it[0].open,eC=it[it.length-1].close,p=(eC-sO)/sO*100,wins=it.filter(function(e){return e.pnl>0;}).length;
     return{key:g.key,label:g.label,items:it,startOpen:sO,endClose:eC,pnl:p,wins:wins,total:it.length};
   });
+}
+
+function esc(value){
+  var node=document.createElement('div');
+  node.textContent=value==null?'':String(value);
+  return node.innerHTML;
 }
 
 /* ── 서버에서 일지 로드 ── */
@@ -1001,9 +1022,7 @@ function refreshEntryBotStatus(){
         btn.style.color='var(--green)'; btn.style.borderColor='var(--green)';
       }
       if(!entryBotAmountLoaded){
-        if(d.usdt_amount)document.getElementById('entrybot-amount').value=d.usdt_amount;
-        if(d.entry_pct!==undefined)document.getElementById('entrybot-pct').value=d.entry_pct;
-        updateSizeModeHint();
+        if(d.risk_per_trade_pct!==undefined)document.getElementById('entrybot-risk').value=d.risk_per_trade_pct;
         if(d.leverage)document.getElementById('entrybot-leverage').value=d.leverage;
         entryBotAmountLoaded=true;
       }
@@ -1025,29 +1044,19 @@ function toggleEntryBot(){
     .catch(function(){alert('설정 변경 실패');});
 }
 
-function updateSizeModeHint(){
-  var pct=parseFloat(document.getElementById('entrybot-pct').value)||0;
-  var amtEl=document.getElementById('entrybot-amount');
-  amtEl.style.opacity=pct>0?'0.35':'1';
-  amtEl.title=pct>0?'복리 모드에서는 고정 금액이 무시됩니다':'';
-}
 function saveEntryBotAmount(){
-  var amount=parseFloat(document.getElementById('entrybot-amount').value);
-  var pct=parseFloat(document.getElementById('entrybot-pct').value)||0;
+  var riskPct=parseFloat(document.getElementById('entrybot-risk').value);
   var leverage=parseInt(document.getElementById('entrybot-leverage').value);
-  if(isNaN(amount)||amount<=0){alert('올바른 금액을 입력해주세요.');return;}
+  if(isNaN(riskPct)||riskPct<0.05||riskPct>1){alert('거래당 위험은 0.05~1.0%로 입력해주세요.');return;}
   if(isNaN(leverage)||leverage<=0||leverage>125){alert('레버리지는 1~125 사이로 입력해주세요.');return;}
   fetch(SERVER+'/api/entrybot/config',{
     method:'POST',
     headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({usdt_amount:amount,leverage:leverage,entry_pct:pct})
+    body:JSON.stringify({risk_per_trade_pct:riskPct,leverage:leverage})
   }).then(function(r){return r.json();})
     .then(function(d){
       if(d.ok){
-        alert(d.entry_pct>0
-          ?('복리 모드: 매 진입 시드의 '+d.entry_pct+'% × '+d.leverage+'x로 저장됐어요. (고정 금액은 무시됨)')
-          :('고정 모드: 진입 금액 '+d.usdt_amount+' USDT / 레버리지 '+d.leverage+'x로 저장됐어요.'));
-        updateSizeModeHint();
+        alert('초기 손절 기준 계좌 '+d.risk_per_trade_pct+'% 위험 / 레버리지 '+d.leverage+'x로 저장됐어요.');
       } else {
         alert('저장 실패: '+(d.msg||''));
       }
@@ -1184,13 +1193,13 @@ function openDayModal(id){
   // ALL ORDERS 대신 POSITIONS/SWING만 표시 — 둘 다 없을 때만 폴백
   if(!pairs.length && !swings.length){
     var extra='';
-    if(entry.pos)extra+='<div class="trade-section-title">SWING POSITION</div><div style="font-family:var(--mono);font-size:12px;color:var(--text2);background:var(--bg3);border:1px solid var(--border);padding:10px 12px">'+entry.pos+'</div>';
-    if(entry.memo)extra+='<div class="trade-section-title" style="margin-top:8px">MEMO</div><div style="font-family:var(--mono);font-size:11px;color:var(--muted2);background:var(--bg3);border:1px solid var(--border);padding:10px 12px">'+entry.memo+'</div>';
+    if(entry.pos)extra+='<div class="trade-section-title">SWING POSITION</div><div style="font-family:var(--mono);font-size:12px;color:var(--text2);background:var(--bg3);border:1px solid var(--border);padding:10px 12px">'+esc(entry.pos)+'</div>';
+    if(entry.memo)extra+='<div class="trade-section-title" style="margin-top:8px">MEMO</div><div style="font-family:var(--mono);font-size:11px;color:var(--muted2);background:var(--bg3);border:1px solid var(--border);padding:10px 12px">'+esc(entry.memo)+'</div>';
     th=extra||'<div class="empty" style="padding:20px">NO EXECUTION DATA</div>';
   }
 
   if(entry.memo&&(pairs.length||swings.length||entry.trades&&entry.trades.length)){
-    th+='<div style="font-family:var(--mono);font-size:10px;color:var(--muted2);margin-top:8px;padding:6px 0">'+entry.memo+'</div>';
+    th+='<div style="font-family:var(--mono);font-size:10px;color:var(--muted2);margin-top:8px;padding:6px 0">'+esc(entry.memo)+'</div>';
   }
   document.getElementById('day-trades-section').innerHTML=th;
   document.getElementById('day-modal-actions').innerHTML=
@@ -1328,7 +1337,7 @@ function renderRecent(data){
       '<td style="color:'+clr(amt)+'">'+sg(amt)+fn(Math.abs(amt))+' USDT</td>'+
       '<td style="color:var(--muted2)">'+fn(d.open)+' USDT</td>'+
       '<td>'+fn(d.close)+' USDT</td>'+
-      '<td style="color:var(--muted);font-size:10px">'+(d.pos||'—')+'</td>'+
+      '<td style="color:var(--muted);font-size:10px">'+esc(d.pos||'—')+'</td>'+
     '</tr>';
   }).join('');
   el.innerHTML='<table class="data-table"><thead><tr><th>DATE</th><th>RETURN</th><th>PNL</th><th>OPEN</th><th>CLOSE</th><th>POSITION</th></tr></thead><tbody>'+rows+'</tbody></table>';
@@ -1382,8 +1391,8 @@ function renderHistory(){
       '<td style="color:'+clr(amt)+'">'+sg(amt)+fn(Math.abs(amt))+' USDT</td>'+
       '<td style="color:var(--muted2)">'+fn(d.open)+' USDT</td>'+
       '<td>'+fn(d.close)+' USDT</td>'+
-      '<td style="font-size:10px;max-width:100px;color:var(--muted2)">'+(d.pos||'—')+'</td>'+
-      '<td style="font-size:10px;color:var(--muted);max-width:100px">'+(d.memo||'')+'</td>'+
+      '<td style="font-size:10px;max-width:100px;color:var(--muted2)">'+esc(d.pos||'—')+'</td>'+
+      '<td style="font-size:10px;color:var(--muted);max-width:100px">'+esc(d.memo||'')+'</td>'+
       '<td style="white-space:nowrap">'+
         '<button class="act-btn" onclick="openEdit('+d.id+')">EDIT</button>'+
         '<button class="act-btn del" onclick="delEntry('+d.id+')">DEL</button>'+
@@ -1621,7 +1630,8 @@ function runBacktest(){
     range_tp_atr:document.getElementById('bt-rtp').value,
     bbw_range:document.getElementById('bt-bbw').value,
     ema_period:document.getElementById('bt-ema').value,
-    fee_mode:document.getElementById('bt-fee').value
+    fee_mode:document.getElementById('bt-fee').value,
+    funding_rate_8h:(parseFloat(document.getElementById('bt-funding').value)||0)/100
   };
   document.getElementById('bt-run').disabled=true;
   fetch(SERVER+'/api/backtest/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
@@ -1690,6 +1700,14 @@ function renderBacktest(res){
       '평균 r 범위: <span style="color:var(--red)">'+lo+'%</span> (전부SL 가정) ~ <span style="color:var(--green)">'+hi+'%</span> (전부TP 가정) · '+
       '누적 비용 드래그: '+sens.cost_drag_total_pct+'%p<br>'+
       '<span style="color:'+vc+'">▶ '+verdict+'</span></div>');
+  }
+  var wf=res.walk_forward;
+  if(wf&&wf.folds){
+    var wfRows=wf.folds.map(function(f){return '<tr><td>'+f.fold+'</td><td>'+f.trades+'</td><td>'+f.ret_pct+'%</td><td>'+f.mdd_pct+'%</td></tr>';}).join('');
+    document.getElementById('bt-metrics').insertAdjacentHTML('afterend',
+      '<div class="table-wrap" style="margin:-4px 0 14px"><div class="table-label">CHRONOLOGICAL VALIDATION — '+
+      (wf.mode==='percent'?'위험 '+wf.param+'%':'고정 '+wf.param+'U')+' · '+wf.leverage+'x</div>'+ 
+      '<table class="data-table"><thead><tr><th>FOLD</th><th>TRADES</th><th>RETURN</th><th>MDD</th></tr></thead><tbody>'+wfRows+'</tbody></table></div>');
   }
 
   var stEl=document.getElementById('bt-strategy');

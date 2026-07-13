@@ -10,7 +10,6 @@ OKX 매매일지 Flask 서버 — Render + Supabase 버전
 import json, hmac, base64, hashlib, time, datetime, os, threading, sys
 from zoneinfo import ZoneInfo
 from flask import Flask, jsonify, request, send_from_directory
-from flask_cors import CORS
 import urllib.request, urllib.parse
 import psycopg2, psycopg2.extras
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -30,8 +29,24 @@ sys.stdout.reconfigure(line_buffering=True)
 sys.stderr.reconfigure(line_buffering=True)
 
 app = Flask(__name__, static_folder='.')
-CORS(app)
 KST = ZoneInfo('Asia/Seoul')
+
+# The dashboard controls live orders and exposes account history.  It must never
+# be reachable as an unauthenticated public API.  Use a long random value in the
+# deployment environment and enter it once in the dashboard when prompted.
+API_ADMIN_TOKEN = os.environ.get("API_ADMIN_TOKEN", "")
+
+@app.before_request
+def require_api_token():
+    """Require a same-origin, explicit admin token for every API operation."""
+    if not request.path.startswith("/api/"):
+        return None
+    if not API_ADMIN_TOKEN:
+        return jsonify({"ok": False, "msg": "API_ADMIN_TOKEN is not configured."}), 503
+    supplied = request.headers.get("X-Admin-Token", "")
+    if not hmac.compare_digest(supplied, API_ADMIN_TOKEN):
+        return jsonify({"ok": False, "msg": "Unauthorized."}), 401
+    return None
 
 # ── DB ──────────────────────────────────────────────────
 def get_db():
@@ -790,10 +805,8 @@ def run_entry_bot():
         # 기본 설정값이 DB에 없으면 생성 (최초 1회)
         if db_get_setting('entry_bot_running') is None:
             db_set_setting('entry_bot_running', 'false')
-        if db_get_setting('entry_bot_usdt_amount') is None:
-            db_set_setting('entry_bot_usdt_amount', '50')
-        if db_get_setting('entry_bot_entry_pct') is None:
-            db_set_setting('entry_bot_entry_pct', '0')   # 0 = 고정 USDT 모드
+        if db_get_setting('entry_bot_risk_per_trade_pct') is None:
+            db_set_setting('entry_bot_risk_per_trade_pct', '0.5')
         if db_get_setting('entry_bot_leverage') is None:
             db_set_setting('entry_bot_leverage', '25')
         print('[EntryBot] OKX 진입 봇 시작 (DB 설정으로 ON/OFF 제어)...')
@@ -1112,9 +1125,8 @@ def entry_bot_status():
     """Entry Bot 상태 + 설정 조회 (DB 기준)"""
     try:
         running = db_get_setting('entry_bot_running', 'false') == 'true'
-        usdt_amount = float(db_get_setting('entry_bot_usdt_amount', '50') or 50)
         leverage = int(float(db_get_setting('entry_bot_leverage', '25') or 25))
-        entry_pct = float(db_get_setting('entry_bot_entry_pct', '0') or 0)
+        risk_per_trade_pct = float(db_get_setting('entry_bot_risk_per_trade_pct', '0.5') or 0.5)
 
         state_path = 'entry_bot_state.json'
         state = {}
@@ -1125,9 +1137,8 @@ def entry_bot_status():
         return jsonify({
             'ok': True,
             'running': running,
-            'usdt_amount': usdt_amount,
             'leverage': leverage,
-            'entry_pct': entry_pct,
+            'risk_per_trade_pct': risk_per_trade_pct,
             'symbol': latest.get('symbol', '—'),
             'phase': latest.get('phase', '—'),
             'signal': latest.get('signal'),
@@ -1143,36 +1154,29 @@ def entry_bot_status():
 
 @app.route('/api/entrybot/config', methods=['POST'])
 def entry_bot_config():
-    """웹사이트에서 봇 ON/OFF, 진입 금액(USDT), 레버리지 설정 — DB에 영속 저장"""
+    """웹사이트에서 봇 ON/OFF, 레버리지, 초기 손절 기준 위험률을 저장한다."""
     try:
         body = request.json or {}
         if 'running' in body:
             db_set_setting('entry_bot_running', 'true' if body['running'] else 'false')
             print(f"[EntryBot] 사용자가 {'활성화' if body['running'] else '정지'}")
-        if 'usdt_amount' in body:
-            amount = float(body['usdt_amount'])
-            if amount <= 0:
-                return jsonify({'ok': False, 'msg': '금액은 0보다 커야 해요.'}), 400
-            db_set_setting('entry_bot_usdt_amount', str(amount))
-            print(f'[EntryBot] 진입 금액 설정: {amount} USDT')
         if 'leverage' in body:
             leverage = int(float(body['leverage']))
             if leverage <= 0 or leverage > 125:
                 return jsonify({'ok': False, 'msg': '레버리지는 1~125 사이여야 해요.'}), 400
             db_set_setting('entry_bot_leverage', str(leverage))
             print(f'[EntryBot] 레버리지 설정: {leverage}x')
-        if 'entry_pct' in body:
-            pct = float(body['entry_pct'])
-            if pct < 0 or pct > 100:
-                return jsonify({'ok': False, 'msg': '진입 비율은 0~100% 사이여야 해요. (0 = 고정 금액 모드)'}), 400
-            db_set_setting('entry_bot_entry_pct', str(pct))
-            print(f"[EntryBot] 진입 비율 설정: {pct}% ({'복리 모드' if pct > 0 else '고정 금액 모드'})")
+        if 'risk_per_trade_pct' in body:
+            pct = float(body['risk_per_trade_pct'])
+            if pct < 0.05 or pct > 1.0:
+                return jsonify({'ok': False, 'msg': '거래당 위험은 0.05~1.0% 사이여야 해요.'}), 400
+            db_set_setting('entry_bot_risk_per_trade_pct', str(pct))
+            print(f"[EntryBot] 초기 손절 기준 거래당 위험 설정: {pct}%")
         return jsonify({
             'ok': True,
             'running': db_get_setting('entry_bot_running', 'false') == 'true',
-            'usdt_amount': float(db_get_setting('entry_bot_usdt_amount', '50') or 50),
             'leverage': int(float(db_get_setting('entry_bot_leverage', '25') or 25)),
-            'entry_pct': float(db_get_setting('entry_bot_entry_pct', '0') or 0),
+            'risk_per_trade_pct': float(db_get_setting('entry_bot_risk_per_trade_pct', '0.5') or 0.5),
         })
     except Exception as e:
         return jsonify({'ok': False, 'msg': str(e)})
@@ -1684,7 +1688,7 @@ def _run_backtest_thread(params):
         candle_data = {}
         need_fetch = []
         for s in symbols:
-            key = (s, days, "15m")
+            key = (s, days, "1H")
             if key in _backtest_candle_cache:
                 candle_data[s] = _backtest_candle_cache[key]
             else:
@@ -1692,9 +1696,9 @@ def _run_backtest_thread(params):
         for idx, s in enumerate(need_fetch):
             _backtest_state["progress"] = {"stage": "download", "symbol": s,
                                            "done": idx, "total": len(need_fetch)}
-            candles = bt.fetch_history(s, "15m", days)
+            candles = bt.fetch_history(s, "1H", days)
             candle_data[s] = candles
-            _backtest_candle_cache[(s, days, "15m")] = candles
+            _backtest_candle_cache[(s, days, "1H")] = candles
 
         def prog(d):
             _backtest_state["progress"] = d
@@ -1705,7 +1709,8 @@ def _run_backtest_thread(params):
             candle_data=candle_data, progress=prog,
             fee_mode=params.get("fee_mode", "taker"),
             htf_filter=params.get("htf_filter", False),
-            cfg_overrides=params.get("cfg_overrides") or None)
+            cfg_overrides=params.get("cfg_overrides") or None,
+            funding_rate_8h=params.get("funding_rate_8h", 0.0001))
         _backtest_state["result"] = result
         _backtest_state["error"] = None
         print(f"[backtest] 완료: {result['summary']['trades']}건, 그리드 {len(result['grid'])}행")
@@ -1731,9 +1736,10 @@ def backtest_run():
             "leverages": [int(x) for x in str(body.get("leverages") or "5,10,15,25,40").split(",") if x.strip()],
             "pcts": [float(x) for x in str(body.get("pcts") or "").split(",") if x.strip()],
             "fixed": [float(x) for x in str(body.get("fixed") or "").split(",") if x.strip()],
-            "max_positions": int(body.get("max_positions", 2)),
+            "max_positions": min(int(body.get("max_positions", 1)), 1),
             "fee_mode": body.get("fee_mode", "taker"),
-            "htf_filter": bool(body.get("htf_filter", False)),
+            "htf_filter": True,
+            "funding_rate_8h": max(0.0, float(body.get("funding_rate_8h", 0.0001))),
             "cfg_overrides": {},
         }
         # 전략 파라미터 오버라이드 (빈 값은 라이브 기본값 사용)
