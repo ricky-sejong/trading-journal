@@ -662,24 +662,8 @@ body{font-family:var(--sans);background:var(--bg);color:var(--text);min-height:1
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
 <script>
-// Serve the UI from the same origin as Flask.  The admin token stays only in
-// this browser tab (sessionStorage), not in source code or persistent storage.
+// Serve the UI from the same origin as Flask.
 var SERVER='';
-(function(){
-  var nativeFetch=window.fetch.bind(window);
-  window.fetch=function(input, init){
-    var token=sessionStorage.getItem('tradingJournalAdminToken');
-    if(!token){
-      token=window.prompt('관리자 API 토큰을 입력하세요.');
-      if(token)sessionStorage.setItem('tradingJournalAdminToken',token);
-    }
-    init=init||{};
-    var headers=new Headers(init.headers||{});
-    if(token)headers.set('X-Admin-Token',token);
-    init.headers=headers;
-    return nativeFetch(input,init);
-  };
-})();
 var ch=null,period='daily',calYear,calMonth,editingId=null;
 var journalData=[];
 var refreshTimers=[];  // 자동갱신 인터벌 ID 배열 (기존 2변수 방식은 4개 중 2개가 유실되는 누수 버그)

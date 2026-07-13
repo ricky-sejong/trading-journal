@@ -31,23 +31,6 @@ sys.stderr.reconfigure(line_buffering=True)
 app = Flask(__name__, static_folder='.')
 KST = ZoneInfo('Asia/Seoul')
 
-# The dashboard controls live orders and exposes account history.  It must never
-# be reachable as an unauthenticated public API.  Use a long random value in the
-# deployment environment and enter it once in the dashboard when prompted.
-API_ADMIN_TOKEN = os.environ.get("API_ADMIN_TOKEN", "")
-
-@app.before_request
-def require_api_token():
-    """Require a same-origin, explicit admin token for every API operation."""
-    if not request.path.startswith("/api/"):
-        return None
-    if not API_ADMIN_TOKEN:
-        return jsonify({"ok": False, "msg": "API_ADMIN_TOKEN is not configured."}), 503
-    supplied = request.headers.get("X-Admin-Token", "")
-    if not hmac.compare_digest(supplied, API_ADMIN_TOKEN):
-        return jsonify({"ok": False, "msg": "Unauthorized."}), 401
-    return None
-
 # ── DB ──────────────────────────────────────────────────
 def get_db():
     url = os.environ.get('DATABASE_URL', '')
