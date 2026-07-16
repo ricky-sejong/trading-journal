@@ -112,6 +112,12 @@ def simulate_symbol(bot, sym, candles, warmup=200, cost_r=None, htf_filter=False
         cost_r = cost_round_trip("taker")
     COST_R = cost_r
 
+    # 라이브 봇의 kline_limit(예: 1H 모드 250)만큼은 warmup이 확보돼야 한다.
+    # warmup < kline_limit이면 루프 초반 window 슬라이스 시작 인덱스가 음수로
+    # 넘어가면서(예: closes[-49:201]) 절대 인덱스 역전으로 빈 리스트가 되고,
+    # calc_bollinger([]) → bb_u[-1]에서 'list index out of range'가 난다.
+    warmup = max(warmup, bot.cfg["kline_limit"])
+
     # HTF 추세 필터: 15분봉 EMA200 ≈ 1시간봉 EMA50 방향 (전 구간 O(n) 사전계산)
     ema_htf = eb.calc_ema(closes, 200) if htf_filter else None
 
