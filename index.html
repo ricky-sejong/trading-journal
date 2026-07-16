@@ -528,6 +528,27 @@ body{font-family:var(--sans);background:var(--bg);color:var(--text);min-height:1
       <span style="color:var(--yellow)">실험:</span>
       <label style="display:flex;align-items:center;gap:4px;cursor:pointer;padding-bottom:5px">
         <input type="checkbox" id="bt-htf" checked disabled> 4H EMA 방향필터 (필수)</label>
+      <label style="display:flex;flex-direction:column;gap:3px">전략 모드
+        <select id="bt-strategy-mode" onchange="toggleRangeFields()" style="font-family:var(--mono);font-size:11px;background:var(--bg3);border:1px solid var(--border2);color:var(--text);padding:5px 6px;outline:none">
+          <option value="trend_only">추세전용 (기본, 라이브와 동일)</option>
+          <option value="auto">자동 (BBW로 추세/횡보 분리)</option>
+        </select></label>
+      <label style="display:flex;flex-direction:column;gap:3px">돈치안 기간
+        <input id="bt-donchian" placeholder="20" style="width:45px;font-family:var(--mono);font-size:11px;background:var(--bg3);border:1px solid var(--border2);color:var(--text);padding:5px 6px;outline:none"></label>
+      <label style="display:flex;flex-direction:column;gap:3px">추세 SL×ATR
+        <input id="bt-tsl" placeholder="2.0" style="width:45px;font-family:var(--mono);font-size:11px;background:var(--bg3);border:1px solid var(--border2);color:var(--text);padding:5px 6px;outline:none"></label>
+      <label style="display:flex;flex-direction:column;gap:3px">추세 TP×ATR
+        <input id="bt-ttp" placeholder="4.0" style="width:45px;font-family:var(--mono);font-size:11px;background:var(--bg3);border:1px solid var(--border2);color:var(--text);padding:5px 6px;outline:none"></label>
+      <label style="display:flex;flex-direction:column;gap:3px">수수료
+        <select id="bt-fee" style="font-family:var(--mono);font-size:11px;background:var(--bg3);border:1px solid var(--border2);color:var(--text);padding:5px 6px;outline:none">
+          <option value="taker">시장가 (0.05%)</option>
+          <option value="maker">지정가 (0.02%)</option>
+        </select></label>
+      <label style="display:flex;flex-direction:column;gap:3px">8H 펀딩비(%)
+        <input id="bt-funding" value="0.01" min="0" step="0.005" style="width:55px;font-family:var(--mono);font-size:11px;background:var(--bg3);border:1px solid var(--border2);color:var(--text);padding:5px 6px;outline:none"></label>
+    </div>
+    <div id="bt-range-opts" style="display:none;gap:10px;flex-wrap:wrap;align-items:flex-end;margin:-6px 0 14px 0;font-family:var(--mono);font-size:10px;color:var(--muted)">
+      <span style="color:var(--yellow)">횡보 전략 (전략모드=자동일 때만 적용):</span>
       <label style="display:flex;flex-direction:column;gap:3px">횡보 SL×ATR
         <input id="bt-rsl" placeholder="1.0" style="width:45px;font-family:var(--mono);font-size:11px;background:var(--bg3);border:1px solid var(--border2);color:var(--text);padding:5px 6px;outline:none"></label>
       <label style="display:flex;flex-direction:column;gap:3px">횡보 TP×ATR
@@ -536,13 +557,6 @@ body{font-family:var(--sans);background:var(--bg);color:var(--text);min-height:1
         <input id="bt-bbw" placeholder="2.5" style="width:45px;font-family:var(--mono);font-size:11px;background:var(--bg3);border:1px solid var(--border2);color:var(--text);padding:5px 6px;outline:none"></label>
       <label style="display:flex;flex-direction:column;gap:3px">EMA 기간
         <input id="bt-ema" placeholder="50" style="width:45px;font-family:var(--mono);font-size:11px;background:var(--bg3);border:1px solid var(--border2);color:var(--text);padding:5px 6px;outline:none"></label>
-      <label style="display:flex;flex-direction:column;gap:3px">수수료
-        <select id="bt-fee" style="font-family:var(--mono);font-size:11px;background:var(--bg3);border:1px solid var(--border2);color:var(--text);padding:5px 6px;outline:none">
-          <option value="taker">시장가 (0.05%)</option>
-          <option value="maker">지정가 (0.02%)</option>
-        </select></label>
-      <label style="display:flex;flex-direction:column;gap:3px">8H 펀딩비(%)
-        <input id="bt-funding" value="0.01" min="0" step="0.005" style="width:55px;font-family:var(--mono);font-size:11px;background:var(--bg3);border:1px solid var(--border2);color:var(--text);padding:5px 6px;outline:none"></label>
     </div>
 
     <div id="bt-progress" style="font-family:var(--mono);font-size:11px;color:var(--yellow);margin-bottom:12px;display:none"></div>
@@ -1601,6 +1615,11 @@ function syncSignalResults(){
 /* ── BACKTEST 패널 ── */
 var btTimer=null;
 
+function toggleRangeFields(){
+  var isAuto=document.getElementById('bt-strategy-mode').value==='auto';
+  document.getElementById('bt-range-opts').style.display=isAuto?'flex':'none';
+}
+
 function runBacktest(){
   var body={
     symbols:document.getElementById('bt-symbols').value,
@@ -1610,6 +1629,10 @@ function runBacktest(){
     pcts:document.getElementById('bt-pcts').value,
     fixed:document.getElementById('bt-fixed').value,
     htf_filter:document.getElementById('bt-htf').checked,
+    strategy_mode:document.getElementById('bt-strategy-mode').value,
+    donchian_period:document.getElementById('bt-donchian').value,
+    trend_sl_atr:document.getElementById('bt-tsl').value,
+    trend_tp_atr:document.getElementById('bt-ttp').value,
     range_sl_atr:document.getElementById('bt-rsl').value,
     range_tp_atr:document.getElementById('bt-rtp').value,
     bbw_range:document.getElementById('bt-bbw').value,
@@ -1659,6 +1682,10 @@ function renderBacktest(res){
   var condParts=[];
   if(p.htf_filter)condParts.push('1H필터 ON');
   var ov=p.overrides||{};
+  condParts.push(ov.strategy_mode==='auto'?'전략모드:자동':'전략모드:추세전용');
+  if(ov.donchian_period)condParts.push('돈치안'+ov.donchian_period);
+  if(ov.trend_sl_atr)condParts.push('추세SL×'+ov.trend_sl_atr);
+  if(ov.trend_tp_atr)condParts.push('추세TP×'+ov.trend_tp_atr);
   if(ov.range_sl_atr)condParts.push('횡보SL×'+ov.range_sl_atr);
   if(ov.range_tp_atr)condParts.push('횡보TP×'+ov.range_tp_atr);
   if(ov.bbw_range_thresh)condParts.push('BBW<'+(ov.bbw_range_thresh*100).toFixed(1)+'%');

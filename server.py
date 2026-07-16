@@ -1727,6 +1727,12 @@ def backtest_run():
         }
         # 전략 파라미터 오버라이드 (빈 값은 라이브 기본값 사용)
         ov = params["cfg_overrides"]
+        # trend_only(기본) 모드에서 실제로 신호 판정에 쓰이는 파라미터
+        if body.get("donchian_period"): ov["donchian_period"]   = int(float(body["donchian_period"]))
+        if body.get("trend_sl_atr"):    ov["trend_sl_atr"]      = float(body["trend_sl_atr"])
+        if body.get("trend_tp_atr"):    ov["trend_tp_atr"]      = float(body["trend_tp_atr"])
+        if body.get("strategy_mode"):   ov["strategy_mode"]     = body["strategy_mode"]
+        # 레짐분리("자동") 모드로 전환했을 때만 의미 있는 횡보 전략 파라미터
         if body.get("range_sl_atr"):  ov["range_sl_atr"]  = float(body["range_sl_atr"])
         if body.get("range_tp_atr"):  ov["range_tp_atr"]  = float(body["range_tp_atr"])
         if body.get("bbw_range"):     ov["bbw_range_thresh"] = float(body["bbw_range"]) / 100.0
