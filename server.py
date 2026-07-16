@@ -1721,7 +1721,7 @@ def backtest_run():
             "fixed": [float(x) for x in str(body.get("fixed") or "").split(",") if x.strip()],
             "max_positions": min(int(body.get("max_positions", 1)), 1),
             "fee_mode": body.get("fee_mode", "taker"),
-            "htf_filter": True,
+            "htf_filter": bool(body.get("htf_filter", True)),
             "funding_rate_8h": max(0.0, float(body.get("funding_rate_8h", 0.0001))),
             "cfg_overrides": {},
         }
