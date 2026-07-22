@@ -751,11 +751,16 @@ class PositionGuardian:
                 new_sl = max(trail_sl, base_sl) if base_sl else trail_sl
             else:
                 new_sl = base_sl
-            if st["current_sl"] is not None:
-                new_sl = max(new_sl, st["current_sl"])  # 래칫
+            # min_gap은 '이제 막 계산된 SL'이 현재가에 비정상적으로 딱 붙었을 때만 보정한다.
+            # 래칫(직전 SL 이하로 못 내려감)을 반드시 min_gap보다 나중에, 최종 클램프로 적용해야
+            # 가격이 SL 쪽으로 다가올 때(=손실 중일 때) min_gap이 SL을 다시 끌어내리는 걸 막는다.
+            # (예전 순서: 래칫→min_gap 이면, 하락 중 mark-new_sl이 좁아질 때마다
+            #  min_gap이 new_sl=mark-min_gap으로 SL을 매번 더 아래로 밀어내 래칫이 무효화됐음)
             min_gap = mark * ((cfg["min_sl_distance_pct"]*lev_factor)/100)
             if mark - new_sl < min_gap:
                 new_sl = mark - min_gap
+            if st["current_sl"] is not None:
+                new_sl = max(new_sl, st["current_sl"])  # 래칫 — 항상 마지막에, 무조건 적용
         else:
             if st["trail_low"] is None or mark < st["trail_low"]:
                 st["trail_low"] = mark
@@ -764,11 +769,11 @@ class PositionGuardian:
                 new_sl = min(trail_sl, base_sl) if base_sl else trail_sl
             else:
                 new_sl = base_sl
-            if st["current_sl"] is not None:
-                new_sl = min(new_sl, st["current_sl"])
             min_gap = mark * ((cfg["min_sl_distance_pct"]*lev_factor)/100)
             if new_sl - mark < min_gap:
                 new_sl = mark + min_gap
+            if st["current_sl"] is not None:
+                new_sl = min(new_sl, st["current_sl"])  # 래칫 — 항상 마지막에, 무조건 적용
 
         st.update({
             "current_sl":      new_sl,
