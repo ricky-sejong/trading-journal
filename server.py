@@ -836,12 +836,82 @@ def set_start_balance():
     print(f'[settings] START BALANCE: {bal} USDT ({date})')
     return jsonify({'ok': True})
 
+@app.route('/api/cashflow', methods=['GET'])
+def list_cashflow():
+    """추가 입출금 내역 조회. START BALANCE(최초 시드)와는 별개로 이후의 입금/출금을 기록."""
+    try:
+        rows = db_get_settings_by_prefix('cashflow:')
+        flows = []
+        for cid, raw in rows.items():
+            try:
+                d = json.loads(raw)
+                d['id'] = cid
+                flows.append(d)
+            except Exception:
+                continue
+        flows.sort(key=lambda x: x.get('date', ''))
+        return jsonify({'ok': True, 'flows': flows})
+    except Exception as e:
+        return jsonify({'ok': False, 'msg': str(e), 'flows': []})
+
+@app.route('/api/cashflow', methods=['POST'])
+def add_cashflow():
+    """입금/출금 1건 기록. amount는 항상 양수, type으로 방향 구분.
+    ALL-TIME PNL 계산 시 이만큼을 원금에서 가감해 '진짜 매매 손익'만 남긴다."""
+    body = request.json or {}
+    try:
+        amount = float(body.get('amount'))
+        flow_type = body.get('type')
+        date = body.get('date', today_kst())
+        note = str(body.get('note', ''))[:200]
+    except (TypeError, ValueError):
+        return jsonify({'ok': False, 'msg': '금액이 올바르지 않습니다.'}), 400
+    if amount <= 0:
+        return jsonify({'ok': False, 'msg': '금액은 0보다 커야 해요.'}), 400
+    if flow_type not in ('deposit', 'withdraw'):
+        return jsonify({'ok': False, 'msg': "type은 'deposit' 또는 'withdraw'여야 해요."}), 400
+    cid = f"{int(time.time()*1000)}"
+    db_set_setting(f'cashflow:{cid}', json.dumps({
+        'date': date, 'amount': amount, 'type': flow_type, 'note': note,
+    }))
+    print(f'[cashflow] {flow_type} {amount} USDT ({date}) 기록')
+    return jsonify({'ok': True, 'id': cid})
+
+@app.route('/api/cashflow/<cid>', methods=['DELETE'])
+def delete_cashflow(cid):
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM settings WHERE key=%s", (f'cashflow:{cid}',))
+            conn.commit()
+        return jsonify({'ok': True})
+    except Exception as e:
+        return jsonify({'ok': False, 'msg': str(e)})
+
+
 @app.route('/api/journal')
 def get_journal():
     try:
         data = db_load_journal()
         start_bal  = db_get_setting('start_balance')
         start_date = db_get_setting('start_balance_date')
+
+        # 최초 시드 이후의 추가 입출금 반영 — 없으면 net_deposited == start_balance (기존 동작과 동일)
+        cash_flows = []
+        net_deposited = float(start_bal) if start_bal else None
+        try:
+            rows = db_get_settings_by_prefix('cashflow:')
+            for cid, raw in rows.items():
+                d = json.loads(raw)
+                d['id'] = cid
+                cash_flows.append(d)
+            cash_flows.sort(key=lambda x: x.get('date', ''))
+            if net_deposited is not None:
+                for f in cash_flows:
+                    amt = float(f.get('amount', 0) or 0)
+                    net_deposited += amt if f.get('type') == 'deposit' else -amt
+        except Exception as e:
+            print(f'[journal] 입출금 내역 반영 실패: {e}')
 
         # 현재 잔고는 OKX에서 직접 가져옴
         current_bal = None
@@ -859,6 +929,8 @@ def get_journal():
             'start_balance': float(start_bal) if start_bal else None,
             'start_balance_date': start_date,
             'current_balance': current_bal,
+            'cash_flows': cash_flows,
+            'net_deposited': net_deposited,   # ALL-TIME PNL 계산의 실제 기준 (입출금 반영)
         })
     except Exception as e:
         print(f'[journal] error: {e}')
@@ -1721,18 +1793,12 @@ def backtest_run():
             "fixed": [float(x) for x in str(body.get("fixed") or "").split(",") if x.strip()],
             "max_positions": min(int(body.get("max_positions", 1)), 1),
             "fee_mode": body.get("fee_mode", "taker"),
-            "htf_filter": bool(body.get("htf_filter", True)),
+            "htf_filter": True,
             "funding_rate_8h": max(0.0, float(body.get("funding_rate_8h", 0.0001))),
             "cfg_overrides": {},
         }
         # 전략 파라미터 오버라이드 (빈 값은 라이브 기본값 사용)
         ov = params["cfg_overrides"]
-        # trend_only(기본) 모드에서 실제로 신호 판정에 쓰이는 파라미터
-        if body.get("donchian_period"): ov["donchian_period"]   = int(float(body["donchian_period"]))
-        if body.get("trend_sl_atr"):    ov["trend_sl_atr"]      = float(body["trend_sl_atr"])
-        if body.get("trend_tp_atr"):    ov["trend_tp_atr"]      = float(body["trend_tp_atr"])
-        if body.get("strategy_mode"):   ov["strategy_mode"]     = body["strategy_mode"]
-        # 레짐분리("자동") 모드로 전환했을 때만 의미 있는 횡보 전략 파라미터
         if body.get("range_sl_atr"):  ov["range_sl_atr"]  = float(body["range_sl_atr"])
         if body.get("range_tp_atr"):  ov["range_tp_atr"]  = float(body["range_tp_atr"])
         if body.get("bbw_range"):     ov["bbw_range_thresh"] = float(body["bbw_range"]) / 100.0

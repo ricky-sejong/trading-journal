@@ -527,28 +527,7 @@ body{font-family:var(--sans);background:var(--bg);color:var(--text);min-height:1
     <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;margin:-6px 0 14px 0;font-family:var(--mono);font-size:10px;color:var(--muted)">
       <span style="color:var(--yellow)">실험:</span>
       <label style="display:flex;align-items:center;gap:4px;cursor:pointer;padding-bottom:5px">
-        <input type="checkbox" id="bt-htf" checked> 4H EMA 방향필터 (기본 ON, 해제 가능)</label>
-      <label style="display:flex;flex-direction:column;gap:3px">전략 모드
-        <select id="bt-strategy-mode" onchange="toggleRangeFields()" style="font-family:var(--mono);font-size:11px;background:var(--bg3);border:1px solid var(--border2);color:var(--text);padding:5px 6px;outline:none">
-          <option value="trend_only">추세전용 (기본, 라이브와 동일)</option>
-          <option value="auto">자동 (BBW로 추세/횡보 분리)</option>
-        </select></label>
-      <label style="display:flex;flex-direction:column;gap:3px">돈치안 기간
-        <input id="bt-donchian" placeholder="20" style="width:45px;font-family:var(--mono);font-size:11px;background:var(--bg3);border:1px solid var(--border2);color:var(--text);padding:5px 6px;outline:none"></label>
-      <label style="display:flex;flex-direction:column;gap:3px">추세 SL×ATR
-        <input id="bt-tsl" placeholder="2.0" style="width:45px;font-family:var(--mono);font-size:11px;background:var(--bg3);border:1px solid var(--border2);color:var(--text);padding:5px 6px;outline:none"></label>
-      <label style="display:flex;flex-direction:column;gap:3px">추세 TP×ATR
-        <input id="bt-ttp" placeholder="4.0" style="width:45px;font-family:var(--mono);font-size:11px;background:var(--bg3);border:1px solid var(--border2);color:var(--text);padding:5px 6px;outline:none"></label>
-      <label style="display:flex;flex-direction:column;gap:3px">수수료
-        <select id="bt-fee" style="font-family:var(--mono);font-size:11px;background:var(--bg3);border:1px solid var(--border2);color:var(--text);padding:5px 6px;outline:none">
-          <option value="taker">시장가 (0.05%)</option>
-          <option value="maker">지정가 (0.02%)</option>
-        </select></label>
-      <label style="display:flex;flex-direction:column;gap:3px">8H 펀딩비(%)
-        <input id="bt-funding" value="0.01" min="0" step="0.005" style="width:55px;font-family:var(--mono);font-size:11px;background:var(--bg3);border:1px solid var(--border2);color:var(--text);padding:5px 6px;outline:none"></label>
-    </div>
-    <div id="bt-range-opts" style="display:none;gap:10px;flex-wrap:wrap;align-items:flex-end;margin:-6px 0 14px 0;font-family:var(--mono);font-size:10px;color:var(--muted)">
-      <span style="color:var(--yellow)">횡보 전략 (전략모드=자동일 때만 적용):</span>
+        <input type="checkbox" id="bt-htf" checked disabled> 4H EMA 방향필터 (필수)</label>
       <label style="display:flex;flex-direction:column;gap:3px">횡보 SL×ATR
         <input id="bt-rsl" placeholder="1.0" style="width:45px;font-family:var(--mono);font-size:11px;background:var(--bg3);border:1px solid var(--border2);color:var(--text);padding:5px 6px;outline:none"></label>
       <label style="display:flex;flex-direction:column;gap:3px">횡보 TP×ATR
@@ -557,12 +536,17 @@ body{font-family:var(--sans);background:var(--bg);color:var(--text);min-height:1
         <input id="bt-bbw" placeholder="2.5" style="width:45px;font-family:var(--mono);font-size:11px;background:var(--bg3);border:1px solid var(--border2);color:var(--text);padding:5px 6px;outline:none"></label>
       <label style="display:flex;flex-direction:column;gap:3px">EMA 기간
         <input id="bt-ema" placeholder="50" style="width:45px;font-family:var(--mono);font-size:11px;background:var(--bg3);border:1px solid var(--border2);color:var(--text);padding:5px 6px;outline:none"></label>
+      <label style="display:flex;flex-direction:column;gap:3px">수수료
+        <select id="bt-fee" style="font-family:var(--mono);font-size:11px;background:var(--bg3);border:1px solid var(--border2);color:var(--text);padding:5px 6px;outline:none">
+          <option value="taker">시장가 (0.05%)</option>
+          <option value="maker">지정가 (0.02%)</option>
+        </select></label>
+      <label style="display:flex;flex-direction:column;gap:3px">8H 펀딩비(%)
+        <input id="bt-funding" value="0.01" min="0" step="0.005" style="width:55px;font-family:var(--mono);font-size:11px;background:var(--bg3);border:1px solid var(--border2);color:var(--text);padding:5px 6px;outline:none"></label>
     </div>
 
     <div id="bt-progress" style="font-family:var(--mono);font-size:11px;color:var(--yellow);margin-bottom:12px;display:none"></div>
     <div class="metrics" id="bt-metrics"></div>
-    <div id="bt-sensitivity"></div>
-    <div id="bt-walkforward"></div>
     <div class="table-wrap" id="bt-strategy-wrap" style="display:none">
       <div class="table-label">전략별 (사이징 무관 트레이드 통계)</div>
       <div id="bt-strategy"></div>
@@ -610,13 +594,34 @@ body{font-family:var(--sans);background:var(--bg);color:var(--text);min-height:1
   <div class="modal">
     <div class="modal-title">START BALANCE 설정</div>
     <p style="font-family:var(--mono);font-size:10px;color:var(--muted2);margin-bottom:16px;line-height:1.8">
-      처음 입금한 금액과 날짜를 입력해주세요.<br>ALL-TIME PNL 계산의 기준이 됩니다.
+      최초 시드(첫 입금) 금액과 날짜예요.<br>이후 추가 입출금은 별도로 'NET DEPOSITED → 관리'에서 기록하세요.
     </p>
     <div class="form-group"><label>입금 날짜</label><input type="date" id="sb-date"></div>
     <div class="form-group"><label>입금 금액 (USDT)</label><input type="number" id="sb-amount" step="1" placeholder="예: 500"></div>
     <div class="modal-actions">
       <button class="mbtn primary" onclick="saveStartBal()">저장</button>
       <button class="mbtn" onclick="closeStartBalModal()">취소</button>
+    </div>
+  </div>
+</div>
+<div class="modal-bg" id="cashflow-modal">
+  <div class="modal">
+    <div class="modal-title">입출금 내역 관리</div>
+    <p style="font-family:var(--mono);font-size:10px;color:var(--muted2);margin-bottom:16px;line-height:1.8">
+      최초 시드 이후 추가로 입금/출금한 금액을 기록하면 ALL-TIME PNL에서 자동으로 제외/반영돼요.<br>
+      (입금액이 매매수익으로 잘못 잡히는 걸 방지)
+    </p>
+    <div id="cashflow-list" style="max-height:180px;overflow-y:auto;margin-bottom:14px;font-family:var(--mono);font-size:11px"></div>
+    <div class="form-group"><label>구분</label>
+      <select id="cf-type" style="width:100%;font-family:var(--mono);font-size:12px;background:var(--bg3);border:1px solid var(--border2);color:var(--text);padding:7px 8px;outline:none">
+        <option value="deposit">입금</option>
+        <option value="withdraw">출금</option>
+      </select></div>
+    <div class="form-group"><label>날짜</label><input type="date" id="cf-date"></div>
+    <div class="form-group"><label>금액 (USDT)</label><input type="number" id="cf-amount" step="1" placeholder="예: 281"></div>
+    <div class="modal-actions">
+      <button class="mbtn primary" onclick="addCashflow()">추가</button>
+      <button class="mbtn" onclick="closeCashflowModal()">닫기</button>
     </div>
   </div>
 </div>
@@ -731,6 +736,8 @@ function esc(value){
 /* ── 서버에서 일지 로드 ── */
 var startBalanceSetting = null;
 var startBalanceDateSetting = null;
+var netDepositedSetting = null;   // 최초 시드 + 이후 입출금 반영된 실제 원금
+var cashFlows = [];               // 입출금 내역 목록
 
 var currentBalanceLive = null;
 
@@ -741,6 +748,8 @@ function loadJournal(cb){
       journalData=d.data||[];
       startBalanceSetting=d.start_balance||null;
       startBalanceDateSetting=d.start_balance_date||null;
+      netDepositedSetting=(d.net_deposited!==undefined&&d.net_deposited!==null)?d.net_deposited:startBalanceSetting;
+      cashFlows=d.cash_flows||[];
       currentBalanceLive=d.current_balance||null;
       updateTicker();
       if(cb)cb();
@@ -752,7 +761,8 @@ function loadJournal(cb){
 function updateTicker(){
   var data=journalData;
   if(!data.length && !startBalanceSetting)return;
-  var startBal=startBalanceSetting||(data.length?data[0].open:0);
+  // ALL-TIME PNL 기준은 순수 원금(net_deposited) — 이후 입출금은 매매손익이 아니므로 제외
+  var startBal=netDepositedSetting!=null?netDepositedSetting:(startBalanceSetting||(data.length?data[0].open:0));
   var curBal=currentBalanceLive||(data.length?data[data.length-1].close:startBal);
   var totalAmt=curBal-startBal,totalPct=startBal?(curBal-startBal)/startBal*100:0;
   var wins=data.filter(function(d){return d.pnl>0;}).length;
@@ -950,6 +960,55 @@ function saveStartBal(){
         loadJournal(function(){renderAll();});
       }
     }).catch(function(){alert('저장 실패');});
+}
+
+/* ── 입출금 내역 관리 모달 ── */
+function openCashflowModal(){
+  document.getElementById('cf-date').value=todayKST();
+  document.getElementById('cf-amount').value='';
+  renderCashflowList();
+  document.getElementById('cashflow-modal').classList.add('open');
+}
+function closeCashflowModal(){document.getElementById('cashflow-modal').classList.remove('open');}
+document.getElementById('cashflow-modal').addEventListener('click',function(e){if(e.target===this)closeCashflowModal();});
+
+function renderCashflowList(){
+  var el=document.getElementById('cashflow-list');
+  if(!cashFlows.length){
+    el.innerHTML='<div style="color:var(--muted2);padding:8px 0">기록된 추가 입출금이 없어요.</div>';
+    return;
+  }
+  el.innerHTML=cashFlows.map(function(f){
+    var isDep=f.type==='deposit';
+    return '<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid var(--border2)">'+
+      '<span>'+f.date+' <span style="color:'+(isDep?'var(--green)':'var(--red)')+'">'+(isDep?'입금':'출금')+'</span> '+parseFloat(f.amount).toFixed(0)+' USDT</span>'+
+      '<span style="color:var(--muted2);cursor:pointer" onclick="deleteCashflow(\''+f.id+'\')">✕</span></div>';
+  }).join('');
+}
+
+function addCashflow(){
+  var type=document.getElementById('cf-type').value;
+  var date=document.getElementById('cf-date').value;
+  var amount=parseFloat(document.getElementById('cf-amount').value);
+  if(isNaN(amount)||amount<=0||!date){alert('날짜와 금액을 올바르게 입력해주세요.');return;}
+  fetch(SERVER+'/api/cashflow',{
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({type:type,date:date,amount:amount})
+  }).then(function(r){return r.json();})
+    .then(function(d){
+      if(d.ok){
+        document.getElementById('cf-amount').value='';
+        loadJournal(function(){renderAll();renderCashflowList();});
+      }else{alert(d.msg||'저장 실패');}
+    }).catch(function(){alert('저장 실패');});
+}
+
+function deleteCashflow(id){
+  fetch(SERVER+'/api/cashflow/'+id,{method:'DELETE'})
+    .then(function(r){return r.json();})
+    .then(function(d){
+      if(d.ok)loadJournal(function(){renderAll();renderCashflowList();});
+    }).catch(function(){alert('삭제 실패');});
 }
 var guardianPosConfig = {};  // {"BTC-USDT-SWAP-long": true/false}
 
@@ -1255,19 +1314,23 @@ function delEntry(id){
 /* ── 렌더링 ── */
 function renderBanner(data){
   var el=document.getElementById('at-banner');
-  // START BALANCE: 설정값 우선, 없으면 첫 기록 시작잔고
+  // START BALANCE: 최초 시드 (표시용, 원래 의미 그대로 유지)
   var startBal=startBalanceSetting||(data.length?data[0].open:0);
   var startDate=startBalanceDateSetting||(data.length?data[0].date:'—');
+  // ALL-TIME PNL의 기준(원금)은 최초 시드 + 이후 입출금 반영값. 안 그러면 입금액이 수익으로 잡힘.
+  var pnlBase=netDepositedSetting!=null?netDepositedSetting:startBal;
   // 현재 잔고: OKX 실시간 값 우선, 없으면 마지막 기록의 마감잔고
   var curBal=currentBalanceLive||(data.length?data[data.length-1].close:startBal);
-  var totalAmt=curBal-startBal;
-  var totalPct=startBal?(totalAmt/startBal*100):0;
+  var totalAmt=curBal-pnlBase;
+  var totalPct=pnlBase?(totalAmt/pnlBase*100):0;
   var wins=data.filter(function(d){return d.pnl>0;}).length;
   var losses=data.filter(function(d){return d.pnl<0;}).length;
   var editBtn='<span style="color:var(--yellow);cursor:pointer;font-size:9px;margin-left:6px" onclick="openStartBalModal()">✎ SET</span>';
+  var flowBtn='<span style="color:var(--yellow);cursor:pointer;font-size:9px;margin-left:6px" onclick="openCashflowModal()">✎ 관리</span>';
   el.innerHTML=
     '<div class="at-cell"><div class="at-label">ALL-TIME PNL</div><div class="at-val '+pc(totalAmt)+'">'+sg(totalAmt)+fn(totalAmt)+' USDT</div><div class="at-sub">'+sg(totalPct)+totalPct.toFixed(2)+'%</div></div>'+
     '<div class="at-cell"><div class="at-label">START BALANCE'+editBtn+'</div><div class="at-val">'+fn(startBal)+' USDT</div><div class="at-sub">'+fd(startDate)+'</div></div>'+
+    '<div class="at-cell"><div class="at-label">NET DEPOSITED'+flowBtn+'</div><div class="at-val">'+fn(pnlBase)+' USDT</div><div class="at-sub">'+(cashFlows.length?cashFlows.length+'건 입출금 반영':'입출금 없음')+'</div></div>'+
     '<div class="at-cell"><div class="at-label">CURRENT BALANCE</div><div class="at-val">'+fn(curBal)+' USDT</div><div class="at-sub">'+(data.length?fd(data[data.length-1].date):'—')+'</div></div>'+
     '<div class="at-cell"><div class="at-label">WIN / LOSS DAYS</div><div class="at-val"><span style="color:var(--green)">'+wins+'</span> / <span style="color:var(--red)">'+losses+'</span></div><div class="at-sub">'+data.length+' TOTAL DAYS</div></div>';
 }
@@ -1617,11 +1680,6 @@ function syncSignalResults(){
 /* ── BACKTEST 패널 ── */
 var btTimer=null;
 
-function toggleRangeFields(){
-  var isAuto=document.getElementById('bt-strategy-mode').value==='auto';
-  document.getElementById('bt-range-opts').style.display=isAuto?'flex':'none';
-}
-
 function runBacktest(){
   var body={
     symbols:document.getElementById('bt-symbols').value,
@@ -1631,10 +1689,6 @@ function runBacktest(){
     pcts:document.getElementById('bt-pcts').value,
     fixed:document.getElementById('bt-fixed').value,
     htf_filter:document.getElementById('bt-htf').checked,
-    strategy_mode:document.getElementById('bt-strategy-mode').value,
-    donchian_period:document.getElementById('bt-donchian').value,
-    trend_sl_atr:document.getElementById('bt-tsl').value,
-    trend_tp_atr:document.getElementById('bt-ttp').value,
     range_sl_atr:document.getElementById('bt-rsl').value,
     range_tp_atr:document.getElementById('bt-rtp').value,
     bbw_range:document.getElementById('bt-bbw').value,
@@ -1684,10 +1738,6 @@ function renderBacktest(res){
   var condParts=[];
   if(p.htf_filter)condParts.push('1H필터 ON');
   var ov=p.overrides||{};
-  condParts.push(ov.strategy_mode==='auto'?'전략모드:자동':'전략모드:추세전용');
-  if(ov.donchian_period)condParts.push('돈치안'+ov.donchian_period);
-  if(ov.trend_sl_atr)condParts.push('추세SL×'+ov.trend_sl_atr);
-  if(ov.trend_tp_atr)condParts.push('추세TP×'+ov.trend_tp_atr);
   if(ov.range_sl_atr)condParts.push('횡보SL×'+ov.range_sl_atr);
   if(ov.range_tp_atr)condParts.push('횡보TP×'+ov.range_tp_atr);
   if(ov.bbw_range_thresh)condParts.push('BBW<'+(ov.bbw_range_thresh*100).toFixed(1)+'%');
@@ -1701,32 +1751,26 @@ function renderBacktest(res){
     '<div class="metric"><div class="m-label">AVG r</div><div class="m-val '+((s.avg_r_pct||0)>=0?'pos':'neg')+'">'+(s.avg_r_pct!==null?s.avg_r_pct+'%':'—')+'</div></div>'+
     '<div class="metric"><div class="m-label">PERIOD</div><div class="m-val" style="font-size:14px">'+s.days+'D · '+s.symbols.length+'심볼</div></div>';
   var sens=res.sensitivity;
-  var sensEl=document.getElementById('bt-sensitivity');
   if(sens){
     var lo=sens.avg_r_sl_first_pct, hi=sens.avg_r_tp_first_pct;
     var verdict, vc;
     if(hi!==null&&hi<0){verdict='상한도 음수 → 전략 기대값이 음수 (판정 해상도 문제 아님)';vc='var(--red)';}
     else if(lo!==null&&lo>0){verdict='하한도 양수 → 전략 기대값 양수';vc='var(--green)';}
     else{verdict='부호가 갈림 → 15분봉 해상도 한계, 동시터치 정밀 판정 필요';vc='var(--yellow)';}
-    sensEl.innerHTML=
+    document.getElementById('bt-metrics').insertAdjacentHTML('afterend',
       '<div style="font-family:var(--mono);font-size:11px;margin:0 0 14px 0;padding:10px 12px;background:var(--bg2);border:1px solid var(--border2)">'+
       '동시터치(같은 캔들 TP·SL 모두 접촉): '+sens.ambiguous_n+'건 ('+sens.ambiguous_pct+'%) · '+
       '평균 r 범위: <span style="color:var(--red)">'+lo+'%</span> (전부SL 가정) ~ <span style="color:var(--green)">'+hi+'%</span> (전부TP 가정) · '+
       '누적 비용 드래그: '+sens.cost_drag_total_pct+'%p<br>'+
-      '<span style="color:'+vc+'">▶ '+verdict+'</span></div>';
-  }else{
-    sensEl.innerHTML='';
+      '<span style="color:'+vc+'">▶ '+verdict+'</span></div>');
   }
   var wf=res.walk_forward;
-  var wfEl=document.getElementById('bt-walkforward');
   if(wf&&wf.folds){
     var wfRows=wf.folds.map(function(f){return '<tr><td>'+f.fold+'</td><td>'+f.trades+'</td><td>'+f.ret_pct+'%</td><td>'+f.mdd_pct+'%</td></tr>';}).join('');
-    wfEl.innerHTML=
+    document.getElementById('bt-metrics').insertAdjacentHTML('afterend',
       '<div class="table-wrap" style="margin:-4px 0 14px"><div class="table-label">CHRONOLOGICAL VALIDATION — '+
       (wf.mode==='percent'?'위험 '+wf.param+'%':'고정 '+wf.param+'U')+' · '+wf.leverage+'x</div>'+ 
-      '<table class="data-table"><thead><tr><th>FOLD</th><th>TRADES</th><th>RETURN</th><th>MDD</th></tr></thead><tbody>'+wfRows+'</tbody></table></div>';
-  }else{
-    wfEl.innerHTML='';
+      '<table class="data-table"><thead><tr><th>FOLD</th><th>TRADES</th><th>RETURN</th><th>MDD</th></tr></thead><tbody>'+wfRows+'</tbody></table></div>');
   }
 
   var stEl=document.getElementById('bt-strategy');
